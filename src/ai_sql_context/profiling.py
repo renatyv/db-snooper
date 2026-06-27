@@ -35,6 +35,13 @@ STRING_TYPES = {
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}")
 NUMERIC_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
+SENSITIVE_COLUMN_RE = re.compile(r"password|passwd|pwd|hash|salt|secret|token", re.IGNORECASE)
+REDACTED_VALUE = "[REDACTED]"
+
+
+def is_sensitive_column(name: str) -> bool:
+    normalized = re.sub(r"[^a-zA-Z0-9]+", "_", name).strip("_")
+    return bool(SENSITIVE_COLUMN_RE.search(normalized))
 
 
 def base_type(data_type: str) -> str:

@@ -6,14 +6,19 @@ Build a python script that generates `.sql` context files for MariaDB, MySQL, Du
 
 For each table:
 1. Generate `CREATE TABLE` DDL with all indexes and constraints.
-2. Generate table and column profiles:
-* if the table has fewer than 50 rows, include all rows;
-If a column has fewer than 20 distinct values => include all values. Otherwise, per-column:
+2. Generate compact table and column profiles:
+* if a table is empty, include only DDL and row count;
+* if a table has one row, include a single compact redacted row instead of per-column profiles;
+* if a table has fewer than 50 rows, include rows up to a small deterministic cap;
+* never dump values for sensitive fields. Treat column names containing password, passwd, pwd, hash, salt, secret, or token as sensitive and redact sampled rows and value profiles;
+* if a column is all NULL, emit a one-line `all NULL` summary;
+* if a column is a unique identifier, omit top values and value-shape metadata;
+* if a column has fewer than 20 distinct values, include all non-sensitive values. Otherwise, per-column:
 * NULL and non-NULL counts
 * distinct value count
 * min, max, and median for numeric columns;
-* top 10 most frequent values with counts;
-* value shape: length, character classes, common prefixes, date/JSON/numeric-like formats.
+* top 10 most frequent values with counts when they are informative;
+* value shape only when it adds meaningful information and does not duplicate type/DDL metadata.
 3. Detect likely joins:
 * declared PK/FK constraints;
 * columns with overlapping values using sampled value sketches such as MinHash/LSH;
@@ -33,7 +38,7 @@ Output files should be deterministic, compact, and grouped by domain or focused 
 
 # How test if it works
 
-1. Generate file for local MariaDB database `dive_sim` with login `dive_simmer` and password `Matrix1Tem9Voce`
+1. Generate file for a local MariaDB database using credentials supplied from environment variables.
 2. Create a subagent with empty context, load the generate file into his context, ask to generate queries:
 3. use evals `docs/evals/1.txt` and `docs/evals/2.txt` to check if generated queries are correct
 

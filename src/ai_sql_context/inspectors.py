@@ -15,7 +15,15 @@ from ai_sql_context.models import (
     LikelyJoin,
     TableProfile,
 )
-from ai_sql_context.profiling import compact_value, is_numeric_type, is_string_type, normalize_scalar, value_shape
+from ai_sql_context.profiling import (
+    REDACTED_VALUE,
+    compact_value,
+    is_numeric_type,
+    is_sensitive_column,
+    is_string_type,
+    normalize_scalar,
+    value_shape,
+)
 
 
 class DatabaseInspector:
@@ -65,6 +73,8 @@ class DatabaseInspector:
             foreign_keys=self._foreign_keys(conn, table),
             indexes=self._indexes(conn, table),
         )
+        if row_count == 0:
+            return profile
         profile.sample_rows = self._sample_rows(conn, table, columns, row_count)
         profile.column_profiles = [self._column_profile(conn, table, column, row_count) for column in columns]
         return profile
@@ -169,8 +179,12 @@ class DatabaseInspector:
         if row_count >= 50 or not columns:
             return []
         order = order_by_clause(columns)
+        sensitive_columns = {column.name for column in columns if is_sensitive_column(column.name)}
         rows = conn.execute(text(f"SELECT * FROM {quote_identifier(table)} {order} LIMIT 50")).mappings()
-        return [{key: normalize_scalar(value) for key, value in row.items()} for row in rows]
+        return [
+            {key: REDACTED_VALUE if key in sensitive_columns else normalize_scalar(value) for key, value in row.items()}
+            for row in rows
+        ]
 
     def _column_profile(self, conn: Connection, table: str, column: ColumnInfo, row_count: int) -> ColumnProfile:
         table_sql = quote_identifier(table)
@@ -190,6 +204,9 @@ class DatabaseInspector:
         non_null_count = int(counts["non_null_count"] or 0)
         distinct_count = int(counts["distinct_count"] or 0)
         profile = ColumnProfile(column.name, null_count, non_null_count, distinct_count)
+        if is_sensitive_column(column.name):
+            profile.shape = {"redacted": True, "reason": "sensitive column name"}
+            return profile
 
         value_list_limit = 50 if is_string_type(column.data_type) and distinct_count <= 50 else 20
         values_with_counts = self._values_with_counts(conn, table, column.name, limit=value_list_limit if distinct_count <= value_list_limit else 10)
