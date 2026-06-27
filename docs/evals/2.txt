@@ -1,8 +1,8 @@
 # Task
- Daily per-robot/per-command reliability aggregates for June 8 2026, counting distinct `DONE`, `FAILED`, and `FAILED_TIMEOUT` actions only when there are at least 15 commands in that bucket.
+ Daily per-robot/per-command reliability aggregates for June 8 2026 for commands `MOVE`, `PUT_BOX`, `ROTATE_WHEELS`, and `TAKE_BOX`, counting distinct `DONE`, `FAILED`, and `FAILED_TIMEOUT` actions only when there are at least 15 commands in that bucket.
 
 return
-robot id, command, number of successfull actions, number of failed, number of timeouted
+robot id, command, number of successful actions, number of failed, number of timeouted
 
 # expected result
 ```
