@@ -1,0 +1,41 @@
+# Task
+How many times has each robot failed or timeouted to MOVE at '2026-06-08'. Get robot id, level, absolute position in mms. Order by number of errors in descending order.
+
+# expected result
+```
+7	0	22080	1560	1
+7	0	23040	880	1
+7	0	24119	191	1
+7	0	26470	883	1
+7	0	24033	933	1
+7	0	21604	881	1
+7	0	24969	874	1
+7	0	20028	200	1
+7	0	20029	1560	1
+7	0	26200	200	1
+7	0	20978	877	1
+7	0	20010	864	1
+7	0	25081	869	1
+7	0	5600	880	1
+7	0	25722	1561	1
+7	0	18448	2440	1
+7	0	23849	880	1
+```
+
+# refence query
+```sql
+SELECT
+    ah.robot_id, rsh.level, rsh.x_mm, rsh.y_mm, COUNT(*) AS error_count
+FROM
+    action_history ah
+    JOIN action_status_history ash ON ash.action_history_id = ah.id
+    JOIN robot_state_history rsh ON rsh.id = ash.state_history_id
+WHERE
+    ah.command = 'MOVE'
+    AND ash.action_status IN ('FAILED', 'FAILED_TIMEOUT')
+    AND ah.start_time >= '2026-06-08'
+    AND ah.start_time < '2026-06-09'
+GROUP BY
+    ah.robot_id, rsh.level, rsh.x_mm, rsh.y_mm
+ORDER BY error_count DESC;
+```
