@@ -20,8 +20,8 @@ Use `eval-dataset/eval.jsonl` to verify if profiler works
 4. Compare the SQL to the `gold`: both SQL queries themselves and the resulting data
 
 # Technical
-- use python
+- use python and SQLAlchemy to make profiler as DB-agnostic as possible
 - use uv to manage dependencies
-- add simple readme how to run the cmd
+- add simple readme how to run the cmd. Examples with sqlite, postgres, mariadb. Use native connectors if possible.
 - use cli arguments or env variables to pass database, password, login for DB investigation
 - use native database connectors when possible
