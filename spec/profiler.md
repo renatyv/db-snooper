@@ -1,3 +1,5 @@
+# How profiler should work
+
 For each table:
 1. Generate `CREATE TABLE` DDL with all indexes and constraints.
 2. Gererate data profile.
@@ -12,3 +14,8 @@ For each table:
     - top 10 most frequent values with counts when they are informative;
     - value shape only when it adds meaningful information and does not duplicate type/DDL metadata.
 3. LLM-summariazation: A short summary (minimal profile) identifies the meaning and format of a field and a table. If source code is available, us it to produce better summaries
+
+
+# technicals
+- Threads can be used to increase profilers performance. Don't use too many to not overload DB
+
