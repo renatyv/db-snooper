@@ -22,13 +22,13 @@ export DB_NAME=dive_sim
 export DB_USER=dive_simmer
 export DB_PASSWORD='your-password'
 
-uv run ai-sql-context generate --output context/dive_sim.sql
+uv run ai-sql-context profile --output context/dive_sim.sql
 ```
 
 Equivalent explicit flags:
 
 ```bash
-uv run ai-sql-context generate \
+uv run ai-sql-context profile \
   --dialect mysql \
   --host localhost \
   --port 3306 \
@@ -41,7 +41,7 @@ uv run ai-sql-context generate \
 Useful options:
 
 ```bash
-uv run ai-sql-context generate --help
+uv run ai-sql-context profile --help
 ```
 
 ## Validation
