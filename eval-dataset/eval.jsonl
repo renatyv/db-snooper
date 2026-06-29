@@ -1,0 +1,48 @@
+{
+"question_id": 338,
+"db_id": "toxicology",
+"question": "What is the atom ID of double bonded carbon in TR012 molecule?",
+"evidence": "carbon refers to element = 'c'; double bond refers to bond_type = ' = ';",
+"SQL": "SELECT T1.atom_id FROM atom AS T1 INNER JOIN molecule AS T2 ON T1.molecule_id = T2.molecule_id INNER JOIN bond AS T3 ON T2.molecule_id = T3.molecule_id WHERE T2.molecule_id = 'TR012' AND T3.bond_type = '=' AND T1.element = 'c'",
+"difficulty": "moderate"
+},
+{
+"question_id": 339,
+"db_id": "toxicology",
+"question": "List the atom ID of the carcinogenic molecule that contains oxygen?",
+"evidence": "label = '+' mean molecules are carcinogenic; oxygen refers to element = 'o'",
+"SQL": "SELECT T1.atom_id FROM atom AS T1 INNER JOIN molecule AS T2 ON T1.molecule_id = T2.molecule_id WHERE T1.element = 'o' AND T2.label = '+'",
+"difficulty": "simple"
+},
+{
+"question_id": 718,
+"db_id": "superhero",
+"question": "How many superheroes have the super power of \"Super Strength\"?",
+"evidence": "super power of \"Super Strength\" refers to power_name = 'Super Strength'",
+"SQL": "SELECT COUNT(T1.hero_id) FROM hero_power AS T1 INNER JOIN superpower AS T2 ON T1.power_id = T2.id WHERE T2.power_name = 'Super Strength'",
+"difficulty": "simple"
+},
+{
+"question_id": 719,
+"db_id": "superhero",
+"question": "Among the superheroes with the super power of \"Super Strength\", how many of them have a height of over 200cm?",
+"evidence": "super power of \"Super Strength\" refers to power_name = 'Super Strength'; a height of over 200cm refers to height_cm > 200",
+"SQL": "SELECT COUNT(T1.id) FROM superhero AS T1 INNER JOIN hero_power AS T2 ON T1.id = T2.hero_id INNER JOIN superpower AS T3 ON T2.power_id = T3.id WHERE T3.power_name = 'Super Strength' AND T1.height_cm > 200",
+"difficulty": "moderate"
+},
+{
+"question_id": 1315,
+"db_id": "student_club",
+"question": "How many students of the Student_Club have attended the event \"Women's Soccer\"?",
+"evidence": "Women's Soccer is an event name",
+"SQL": "SELECT COUNT(T1.event_id) FROM event AS T1 INNER JOIN attendance AS T2 ON T1.event_id = T2.link_to_event WHERE T1.event_name = 'Women''s Soccer'",
+"difficulty": "simple"
+},
+{
+"question_id": 1316,
+"db_id": "student_club",
+"question": "Please list the phone numbers of the students from the Student_Club that has attended the event \"Women's Soccer\".",
+"evidence": "Women's Soccer is an event name; phone numbers refers to phone",
+"SQL": "SELECT T3.phone FROM event AS T1 INNER JOIN attendance AS T2 ON T1.event_id = T2.link_to_event INNER JOIN member AS T3 ON T2.link_to_member = T3.member_id WHERE T1.event_name = 'Women''s Soccer'",
+"difficulty": "moderate"
+},

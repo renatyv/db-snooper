@@ -4,7 +4,7 @@ To efficiently convert text to analytic SQL queries LLMs need to know a lot abou
 # Ideas
 
 ## 1. [Database profiling](profiler.md)
-Build a python script that generates `.sql` profile files for MariaDB, MySQL, DuckDB, and PostgreSQL.
+Build a python script that generates `.sql` profile files for SQLite, MariaDB, MySQL, DuckDB, and PostgreSQL.
 
 ## 2. [Schema linking](schema_linking.md)
 Use the following techniques to generate a separate .md file with ponentially useful paths for JOINs and how fields from different tables can be combined.
@@ -12,15 +12,16 @@ Use the following techniques to generate a separate .md file with ponentially us
 ## 3. Multiple candidates voting
 When a request to generate SQL is given, generate 3 candidate queries for each question. Introduce variety by changing the LLM's randomization seed and the order of the schema fields in the prompt.
 
-# How test if it works
-check the [example](profile_example.sql)
-
-1. Generate file for a local MariaDB database using credentials supplied from environment variables.
-2. Create a subagent with empty context, load the generate file into his context, ask to generate queries:
-3. use evals `docs/evals/1.txt` and `docs/evals/2.txt` to check if generated queries are correct
+# Evals
+Use `eval-dataset/eval.jsonl` to verify if profiler works
+1. Load corresponding SQLite database
+2. Generate the profile using the script
+3. Generate SQL from the query in a subagent with generated profile in the context
+4. Compare the SQL to the `gold`: both SQL queries themselves and the resulting data
 
 # Technical
-- Use uv to manage dependencies
+- use python
+- use uv to manage dependencies
 - add simple readme how to run the cmd
 - use cli arguments or env variables to pass database, password, login for DB investigation
 - use native database connectors when possible
