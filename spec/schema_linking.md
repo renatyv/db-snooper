@@ -51,3 +51,27 @@ SELECT COUNT(*) FROM (
 ) x;
 ```
 Confirms or rejects LSH candidates; catches approximation false positives.
+
+Don't include inferred links if they have less than 3 evidence. Sort inferred list by evidence: more evidence - higher up in the list.
+
+Output example:
+```
+- version: 0.1.0
+- dialect: mariadb
+- database: dive_sim
+
+## Declared PK/FK Links
+
+| From | To |
+|---|---|
+| action_status_history.action_history_id | action_history.id
+| action_status_history.state_history_id | robot_state_history.id
+
+
+## Inferred Links
+
+| From | To | Evidence |
+|---|---|---:|---|
+| action_history.robot_id | box_movement_history.robot_id | minhash containment candidate, name match, shared name tokens, similar names, type match |
+| action_history.robot_id | move_robot.robot_id | minhash containment candidate, name match, shared name tokens, similar names, type match |
+```

@@ -25,7 +25,7 @@ Use `eval-dataset/eval.jsonl` to verify if profiler works
 * sources in `src/` folder, tests in `test` or `tests`
 * add simple readme how to run the cmd. Examples with sqlite, postgres, mariadb. Use native connectors if possible.
 
-* CLI interface
+* CLI interface, both profile and schema links
   - infer host, login, pass from ENV variables and/or CLI arguments.
   - Use sensible defaults: localhost, infere port from database type, ask user for password if not given in ENV, figure out output profile filename from the database name.
   - use progress bar to show how profiling and schema linking is going. Maybe even show which tables are currently being pofiled
