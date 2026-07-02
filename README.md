@@ -13,35 +13,35 @@ uv sync --extra dev
 SQLite example:
 
 ```bash
-uv run db-snooper profile --db-type sqlite --database eval-dataset/superhero/superhero.sqlite --output superhero.profile.sql
+uv run db-snooper profile --db-type sqlite --database eval-dataset/superhero/superhero.sqlite
 ```
 
 PostgreSQL example:
 
 ```bash
 uv sync --extra postgres
-uv run db-snooper profile --db-type postgres --host localhost --port 5432 --database dbname --user user --ask-password --output db.profile.sql
+uv run db-snooper profile --db-type postgres --database dbname --user user
 ```
 
 MySQL example:
 
 ```bash
 uv sync --extra mysql
-uv run db-snooper profile --db-type mysql --host localhost --port 3306 --database dbname --user user --ask-password --output db.profile.sql
+uv run db-snooper profile --db-type mysql --database dbname --user user
 ```
 
 MariaDB example:
 
 ```bash
 uv sync --extra mariadb
-uv run db-snooper profile --db-type mariadb --host localhost --port 3306 --database dbname --user user --ask-password --output db.profile.sql
+uv run db-snooper profile --db-type mariadb --database dbname --user user
 ```
 
 DuckDB example:
 
 ```bash
 uv sync --extra duckdb
-uv run db-snooper profile --db-type duckdb --database warehouse.duckdb --output warehouse.profile.sql
+uv run db-snooper profile --db-type duckdb --database warehouse.duckdb
 ```
 
 Connection values can also come from environment variables:
@@ -49,20 +49,20 @@ Connection values can also come from environment variables:
 ```bash
 DB_SNOOPER_DB_TYPE=sqlite \
 DB_SNOOPER_DATABASE=eval-dataset/student_club/student_club.sqlite \
-uv run db-snooper profile --output student_club.profile.sql
+uv run db-snooper profile
 ```
 
-For server databases, use `DB_SNOOPER_DB_PASSWORD` instead of putting the password in shell history:
+For server databases, `--host` defaults to `localhost`, `--port` defaults to the database default (`5432` for PostgreSQL and `3306` for MySQL/MariaDB), and the command prompts securely for the password when `DB_SNOOPER_DB_PASSWORD` is not set:
 
 ```bash
 DB_SNOOPER_DB_TYPE=postgres \
-DB_SNOOPER_DB_HOST=localhost \
-DB_SNOOPER_DB_PORT=5432 \
 DB_SNOOPER_DATABASE=dbname \
 DB_SNOOPER_DB_USER=user \
 DB_SNOOPER_DB_PASSWORD=password \
-uv run db-snooper profile --output db.profile.sql
+uv run db-snooper profile
 ```
+
+By default, `profile` writes to `<database>_profile.sql`, such as `superhero_profile.sql` or `dbname_profile.sql`. Pass `--output` to choose a different path.
 
 Useful options:
 

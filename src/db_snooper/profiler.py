@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
-import sys
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -307,10 +307,16 @@ def parse_table_set(value: str | None) -> frozenset[str] | None:
     return frozenset(table.strip() for table in value.split(",") if table.strip())
 
 
+def default_output_path(database: str) -> Path:
+    name = Path(database).name
+    db_name = Path(name).stem or name
+    return Path(f"{db_name}_profile.sql")
+
+
 def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate a SQL profile for a database.", prog=prog)
     add_connection_arguments(parser)
-    parser.add_argument("--output", help="Output .sql file. Defaults to stdout.")
+    parser.add_argument("--output", help="Output .sql file. Defaults to <database>_profile.sql.")
     parser.add_argument("--sample-row-limit", type=int, default=50, help="Maximum sampled rows for small tables.")
     parser.add_argument("--small-table-threshold", type=int, default=50, help="Rows at or below this count are sampled.")
     parser.add_argument("--include-tables", help="Comma-separated table allowlist.")
@@ -331,10 +337,8 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     )
     engine = create_engine(url)
     output = profile_database(engine, options)
-    if args.output:
-        Path(args.output).write_text(output, encoding="utf-8")
-    else:
-        sys.stdout.write(output)
+    output_path = Path(args.output) if args.output else default_output_path(args.database or os.environ["DB_SNOOPER_DATABASE"])
+    output_path.write_text(output, encoding="utf-8")
     return 0
 
 

@@ -15,6 +15,12 @@ DRIVER_NAMES = {
     "duckdb": "duckdb",
 }
 
+DEFAULT_PORTS = {
+    "postgres": 5432,
+    "mysql": 3306,
+    "mariadb": 3306,
+}
+
 def add_connection_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--db-type",
@@ -28,12 +34,17 @@ def add_connection_arguments(parser: argparse.ArgumentParser) -> None:
         help="Database name, or file path for SQLite/DuckDB. Defaults to DB_SNOOPER_DATABASE.",
     )
     parser.add_argument("--host", default=None, help="Database host. Defaults to DB_SNOOPER_DB_HOST or localhost.")
-    parser.add_argument("--port", type=int, default=None, help="Database port. Defaults to DB_SNOOPER_DB_PORT.")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Database port. Defaults to DB_SNOOPER_DB_PORT or the database server default.",
+    )
     parser.add_argument("--user", default=None, help="Database user. Defaults to DB_SNOOPER_DB_USER.")
     parser.add_argument(
         "--password",
         default=None,
-        help="Database password. Prefer DB_SNOOPER_DB_PASSWORD or --ask-password to avoid shell history.",
+        help="Database password. Defaults to DB_SNOOPER_DB_PASSWORD, then a secure prompt for server databases.",
     )
     parser.add_argument("--ask-password", action="store_true", help="Prompt securely for the database password.")
 
@@ -52,16 +63,15 @@ def resolve_database_url(args: argparse.Namespace, parser: argparse.ArgumentPars
     if not database:
         parser.error("--database or DB_SNOOPER_DATABASE is required")
 
-    password = _value(args, "password", "DB_SNOOPER_DB_PASSWORD")
-    if args.ask_password:
-        password = getpass.getpass("Database password: ")
-
     if db_type in {"sqlite", "duckdb"}:
         return URL.create(DRIVER_NAMES[db_type], database=database)
 
     host = _value(args, "host", "DB_SNOOPER_DB_HOST") or "localhost"
-    port = _optional_int(_value(args, "port", "DB_SNOOPER_DB_PORT"), parser)
+    port = _optional_int(_value(args, "port", "DB_SNOOPER_DB_PORT"), parser) or DEFAULT_PORTS[db_type]
     user = _value(args, "user", "DB_SNOOPER_DB_USER")
+    password = _value(args, "password", "DB_SNOOPER_DB_PASSWORD")
+    if args.ask_password or password is None:
+        password = getpass.getpass("Database password: ")
     return URL.create(DRIVER_NAMES[db_type], username=user, password=password, host=host, port=port, database=database)
 
 
