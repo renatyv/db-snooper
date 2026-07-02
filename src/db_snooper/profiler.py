@@ -15,7 +15,8 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.schema import CreateIndex, CreateTable, UniqueConstraint
 from sqlalchemy.sql.sqltypes import BigInteger, Float, Integer, Numeric, SmallInteger, String, Text
 
-from ai_sql_context import __version__
+from db_snooper import __version__
+from db_snooper.connection import add_connection_arguments, resolve_database_url
 
 SENSITIVE_NAME_PARTS = ("password", "passwd", "pwd", "hash", "salt", "secret", "token")
 
@@ -38,7 +39,7 @@ def profile_database(engine: Engine, options: ProfileOptions) -> str:
     url = engine.url.render_as_string(hide_password=True)
     database = engine.url.database or ""
     lines = [
-        "-- ai-sql-context",
+        "-- db-snooper",
         f"-- version: {__version__}",
         f"-- dialect: {engine.dialect.name}",
         f"-- database: {database}",
@@ -306,9 +307,9 @@ def parse_table_set(value: str | None) -> frozenset[str] | None:
     return frozenset(table.strip() for table in value.split(",") if table.strip())
 
 
-def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Generate a SQL profile for a database.")
-    parser.add_argument("--url", default=None, help="SQLAlchemy database URL. Defaults to AI_SQL_CONTEXT_DB_URL.")
+def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Generate a SQL profile for a database.", prog=prog)
+    add_connection_arguments(parser)
     parser.add_argument("--output", help="Output .sql file. Defaults to stdout.")
     parser.add_argument("--sample-row-limit", type=int, default=50, help="Maximum sampled rows for small tables.")
     parser.add_argument("--small-table-threshold", type=int, default=50, help="Rows at or below this count are sampled.")
@@ -317,16 +318,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_arg_parser()
+def main(argv: list[str] | None = None, prog: str | None = None) -> int:
+    parser = build_arg_parser(prog=prog)
     args = parser.parse_args(argv)
-    url = args.url
-    if url is None:
-        import os
-
-        url = os.environ.get("AI_SQL_CONTEXT_DB_URL")
-    if not url:
-        parser.error("--url or AI_SQL_CONTEXT_DB_URL is required")
+    url = resolve_database_url(args, parser)
 
     options = ProfileOptions(
         small_table_threshold=args.small_table_threshold,

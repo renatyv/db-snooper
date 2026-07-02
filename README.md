@@ -1,6 +1,8 @@
-## DB Profiler
+## DB Snooper
 
-Generate a `.sql` profile containing DDL, row counts, sampled small tables, and per-column data profiles.
+Snoop through databases and generate compact LLM-ready SQL context.
+
+The `profile` command generates a `.sql` profile containing DDL, row counts, sampled small tables, and per-column data profiles.
 
 Install dependencies with uv:
 
@@ -11,42 +13,58 @@ uv sync --extra dev
 SQLite example:
 
 ```bash
-uv run ai-sql-profile --url sqlite:///eval-dataset/superhero/superhero.sqlite --output superhero.profile.sql
+uv run db-snooper profile --db-type sqlite --database eval-dataset/superhero/superhero.sqlite --output superhero.profile.sql
 ```
 
 PostgreSQL example:
 
 ```bash
 uv sync --extra postgres
-uv run ai-sql-profile --url 'postgresql+psycopg://user:password@localhost:5432/dbname' --output db.profile.sql
+uv run db-snooper profile --db-type postgres --host localhost --port 5432 --database dbname --user user --ask-password --output db.profile.sql
 ```
 
 MySQL example:
 
 ```bash
 uv sync --extra mysql
-uv run ai-sql-profile --url 'mysql+pymysql://user:password@localhost:3306/dbname' --output db.profile.sql
+uv run db-snooper profile --db-type mysql --host localhost --port 3306 --database dbname --user user --ask-password --output db.profile.sql
 ```
 
 MariaDB example:
 
 ```bash
 uv sync --extra mariadb
-uv run ai-sql-profile --url 'mariadb+mariadbconnector://user:password@localhost:3306/dbname' --output db.profile.sql
+uv run db-snooper profile --db-type mariadb --host localhost --port 3306 --database dbname --user user --ask-password --output db.profile.sql
 ```
 
 DuckDB example:
 
 ```bash
 uv sync --extra duckdb
-uv run ai-sql-profile --url 'duckdb:///warehouse.duckdb' --output warehouse.profile.sql
+uv run db-snooper profile --db-type duckdb --database warehouse.duckdb --output warehouse.profile.sql
 ```
 
-You can also pass the URL through `AI_SQL_CONTEXT_DB_URL`:
+Connection values can also come from environment variables:
 
 ```bash
-AI_SQL_CONTEXT_DB_URL=sqlite:///eval-dataset/student_club/student_club.sqlite uv run ai-sql-profile --output student_club.profile.sql
+DB_SNOOPER_DB_TYPE=sqlite \
+DB_SNOOPER_DATABASE=eval-dataset/student_club/student_club.sqlite \
+uv run db-snooper profile --output student_club.profile.sql
 ```
+
+For server databases, use `DB_SNOOPER_DB_PASSWORD` instead of putting the password in shell history:
+
+```bash
+DB_SNOOPER_DB_TYPE=postgres \
+DB_SNOOPER_DB_HOST=localhost \
+DB_SNOOPER_DB_PORT=5432 \
+DB_SNOOPER_DATABASE=dbname \
+DB_SNOOPER_DB_USER=user \
+DB_SNOOPER_DB_PASSWORD=password \
+uv run db-snooper profile --output db.profile.sql
+```
+
+Advanced: you can still pass a SQLAlchemy URL with `--url` or `DB_SNOOPER_DB_URL`.
 
 Useful options:
 
@@ -56,6 +74,31 @@ Useful options:
 - `--exclude-tables table_c`: skip selected tables.
 
 Sensitive columns whose names contain `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token` are redacted in sampled rows and do not emit value profiles.
+
+## Schema Links
+
+The `links` command generates a `.md` file containing declared PK/FK links and inferred join candidates.
+
+SQLite example:
+
+```bash
+uv run db-snooper links --db-type sqlite --database eval-dataset/superhero/superhero.sqlite --output superhero.schema_links.md
+```
+
+Environment variable example:
+
+```bash
+DB_SNOOPER_DB_TYPE=sqlite \
+DB_SNOOPER_DATABASE=eval-dataset/student_club/student_club.sqlite \
+uv run db-snooper links --output student_club.schema_links.md
+```
+
+Useful options:
+
+- `--include-tables table_a,table_b`: only inspect selected tables.
+- `--exclude-tables table_c`: skip selected tables.
+- `--containment-threshold 0.8`: minimum exact containment for inferred links.
+- `--max-distinct-values 100000`: maximum distinct values loaded per candidate column.
 
 ## License
 

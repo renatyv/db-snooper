@@ -1,4 +1,4 @@
--- ai-sql-context
+-- db-snooper
 -- version: 0.1.0
 -- dialect: mysql
 -- database: dive_sim
