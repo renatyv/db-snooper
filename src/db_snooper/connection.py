@@ -16,7 +16,6 @@ DRIVER_NAMES = {
 }
 
 def add_connection_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--url", default=None, help="Advanced: SQLAlchemy database URL. Defaults to DB_SNOOPER_DB_URL.")
     parser.add_argument(
         "--db-type",
         choices=sorted(DRIVER_NAMES),
@@ -39,17 +38,12 @@ def add_connection_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--ask-password", action="store_true", help="Prompt securely for the database password.")
 
 
-def resolve_database_url(args: argparse.Namespace, parser: argparse.ArgumentParser) -> str | URL:
-    url = _value(args, "url", "DB_SNOOPER_DB_URL")
-    if url:
-        return url
-
+def resolve_database_url(args: argparse.Namespace, parser: argparse.ArgumentParser) -> URL:
     db_type = _value(args, "db_type", "DB_SNOOPER_DB_TYPE")
     if not db_type:
         parser.error(
             "database connection is required. Use friendly flags like "
-            "--db-type sqlite --database path/to.db, set DB_SNOOPER_DB_TYPE and DB_SNOOPER_DATABASE, "
-            "or use advanced --url/DB_SNOOPER_DB_URL."
+            "--db-type sqlite --database path/to.db, or set DB_SNOOPER_DB_TYPE and DB_SNOOPER_DATABASE."
         )
     if db_type not in DRIVER_NAMES:
         parser.error(f"unsupported --db-type {db_type!r}; choose one of: {', '.join(sorted(DRIVER_NAMES))}")

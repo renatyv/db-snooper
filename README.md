@@ -64,8 +64,6 @@ DB_SNOOPER_DB_PASSWORD=password \
 uv run db-snooper profile --output db.profile.sql
 ```
 
-Advanced: you can still pass a SQLAlchemy URL with `--url` or `DB_SNOOPER_DB_URL`.
-
 Useful options:
 
 - `--small-table-threshold 50`: tables with this many rows or fewer are sampled instead of column-profiled.

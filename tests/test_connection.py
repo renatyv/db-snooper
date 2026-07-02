@@ -42,10 +42,6 @@ def test_postgres_friendly_flags_build_url_with_hidden_password() -> None:
     assert url == "postgresql+psycopg://reporter:***@db.example.com:5432/analytics"
 
 
-def test_url_still_works() -> None:
-    assert parse_url(["--url", "sqlite:///:memory:"]) == "sqlite:///:memory:"
-
-
 def test_environment_variables_build_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DB_SNOOPER_DB_TYPE", "mysql")
     monkeypatch.setenv("DB_SNOOPER_DB_HOST", "db.example.com")
