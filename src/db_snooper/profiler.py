@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -17,6 +18,7 @@ from sqlalchemy.sql.sqltypes import BigInteger, Float, Integer, Numeric, SmallIn
 
 from db_snooper import __version__
 from db_snooper.connection import add_connection_arguments, resolve_database_url
+from db_snooper.progress import ProgressBar
 
 SENSITIVE_NAME_PARTS = ("password", "passwd", "pwd", "hash", "salt", "secret", "token")
 
@@ -29,7 +31,10 @@ class ProfileOptions:
     exclude_tables: frozenset[str] = frozenset()
 
 
-def profile_database(engine: Engine, options: ProfileOptions) -> str:
+ProfileProgress = Callable[[int, int, str], None]
+
+
+def profile_database(engine: Engine, options: ProfileOptions, progress: ProfileProgress | None = None) -> str:
     inspector = inspect(engine)
     tables = sorted(inspector.get_table_names())
     if options.include_tables is not None:
@@ -49,7 +54,9 @@ def profile_database(engine: Engine, options: ProfileOptions) -> str:
 
     with engine.connect() as conn:
         metadata = MetaData()
-        for table_name in tables:
+        for index, table_name in enumerate(tables, start=1):
+            if progress is not None:
+                progress(index - 1, len(tables), table_name)
             table = Table(table_name, metadata, autoload_with=conn)
             ddl = get_table_ddl(conn, table)
             lines.extend(ddl)
@@ -58,6 +65,8 @@ def profile_database(engine: Engine, options: ProfileOptions) -> str:
             lines.extend(profile_table(conn, table, options))
             lines.append("")
             lines.append("")
+            if progress is not None:
+                progress(index, len(tables), table_name)
 
     return "\n".join(lines).rstrip() + "\n"
 
@@ -336,7 +345,23 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         exclude_tables=parse_table_set(args.exclude_tables) or frozenset(),
     )
     engine = create_engine(url)
-    output = profile_database(engine, options)
+    progress_bar = ProgressBar("Profiling", 0)
+
+    def show_progress(current: int, total: int, table_name: str) -> None:
+        nonlocal progress_bar
+        if progress_bar.total != total:
+            progress_bar = ProgressBar("Profiling", total)
+            progress_bar.start(f"profiling {table_name}")
+            return
+        progress_bar.update(current, f"profiling {table_name}" if current < total else f"profiled {table_name}")
+
+    try:
+        output = profile_database(engine, options, progress=show_progress)
+    except Exception:
+        progress_bar.finish()
+        raise
+    else:
+        progress_bar.finish("Profiling complete")
     output_path = Path(args.output) if args.output else default_output_path(args.database or os.environ["DB_SNOOPER_DATABASE"])
     output_path.write_text(output, encoding="utf-8")
     return 0

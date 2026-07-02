@@ -28,3 +28,4 @@ Use `eval-dataset/eval.jsonl` to verify if profiler works
 * CLI interface
   - infer host, login, pass from ENV variables and/or CLI arguments.
   - Use sensible defaults: localhost, infere port from database type, ask user for password if not given in ENV, figure out output profile filename from the database name.
+  - use progress bar to show how profiling and schema linking is going. Maybe even show which tables are currently being pofiled

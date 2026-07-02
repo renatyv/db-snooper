@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
-import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -18,7 +19,9 @@ from sqlalchemy.sql.sqltypes import BigInteger, Date, DateTime, Float, Integer, 
 
 from db_snooper import __version__
 from db_snooper.connection import add_connection_arguments, resolve_database_url
+from db_snooper.profiler import default_output_path as default_profile_output_path
 from db_snooper.profiler import is_sensitive, parse_table_set
+from db_snooper.progress import ProgressBar
 
 
 @dataclass(frozen=True)
@@ -82,7 +85,10 @@ class InferredLink:
     notes: tuple[str, ...]
 
 
-def link_schema(engine: Engine, options: SchemaLinkOptions) -> str:
+SchemaLinkProgress = Callable[[int, int, str], None]
+
+
+def link_schema(engine: Engine, options: SchemaLinkOptions, progress: SchemaLinkProgress | None = None) -> str:
     inspector = inspect(engine)
     table_names = sorted(inspector.get_table_names())
     if options.include_tables is not None:
@@ -94,10 +100,16 @@ def link_schema(engine: Engine, options: SchemaLinkOptions) -> str:
 
     with engine.connect() as conn:
         metadata = MetaData()
-        tables = [Table(table_name, metadata, autoload_with=conn) for table_name in table_names]
+        tables = []
+        for index, table_name in enumerate(table_names, start=1):
+            if progress is not None:
+                progress(index - 1, len(table_names), f"reflecting {table_name}")
+            tables.append(Table(table_name, metadata, autoload_with=conn))
+            if progress is not None:
+                progress(index, len(table_names), f"reflected {table_name}")
         declared_links = collect_declared_links(tables, set(table_names))
-        column_refs = collect_column_refs(conn, tables, options)
-        inferred_links = infer_links(conn, tables, column_refs, declared_links, options)
+        column_refs = collect_column_refs(conn, tables, options, progress)
+        inferred_links = infer_links(conn, tables, column_refs, declared_links, options, progress)
 
     return render_markdown(engine.dialect.name, database, url, declared_links, inferred_links)
 
@@ -118,10 +130,17 @@ def constraint_sort_key(elements: Any) -> tuple[str, ...]:
     return tuple(element.parent.name for element in elements)
 
 
-def collect_column_refs(conn: Connection, tables: list[Table], options: SchemaLinkOptions) -> dict[tuple[str, str], ColumnRef]:
+def collect_column_refs(
+    conn: Connection,
+    tables: list[Table],
+    options: SchemaLinkOptions,
+    progress: SchemaLinkProgress | None = None,
+) -> dict[tuple[str, str], ColumnRef]:
     refs: dict[tuple[str, str], ColumnRef] = {}
     row_counts = {table.name: int(conn.execute(select(func.count()).select_from(table)).scalar_one()) for table in tables}
-    for table in tables:
+    for index, table in enumerate(tables, start=1):
+        if progress is not None:
+            progress(index - 1, len(tables), f"inspecting {table.name}")
         unique_columns = get_unique_column_names(table)
         for column in table.columns:
             if is_sensitive(column.name):
@@ -144,6 +163,8 @@ def collect_column_refs(conn: Connection, tables: list[Table], options: SchemaLi
                 distinct_count=distinct_count,
             )
             refs[ref.key] = ref
+        if progress is not None:
+            progress(index, len(tables), f"inspected {table.name}")
     return refs
 
 
@@ -153,13 +174,21 @@ def infer_links(
     column_refs: dict[tuple[str, str], ColumnRef],
     declared_links: list[DeclaredLink],
     options: SchemaLinkOptions,
+    progress: SchemaLinkProgress | None = None,
 ) -> list[InferredLink]:
     table_by_name = {table.name: table for table in tables}
     declared_pairs = get_declared_column_pairs(declared_links)
     name_candidates = get_name_candidates(column_refs, declared_pairs, options)
     candidate_columns = get_distinct_candidate_columns(column_refs, name_candidates, options)
 
-    distinct_sets = load_distinct_sets(conn, table_by_name, column_refs, candidate_columns, options.max_distinct_values)
+    distinct_sets = load_distinct_sets(
+        conn,
+        table_by_name,
+        column_refs,
+        candidate_columns,
+        options.max_distinct_values,
+        progress,
+    )
     lsh_candidates = get_lsh_candidates(column_refs, distinct_sets, declared_pairs, options)
     candidates = merge_candidates(name_candidates + lsh_candidates)
 
@@ -246,11 +275,17 @@ def load_distinct_sets(
     column_refs: dict[tuple[str, str], ColumnRef],
     candidate_columns: set[tuple[str, str]],
     max_distinct_values: int,
+    progress: SchemaLinkProgress | None = None,
 ) -> dict[tuple[str, str], set[Any]]:
     distinct_sets: dict[tuple[str, str], set[Any]] = {}
-    for key in sorted(candidate_columns):
+    sorted_candidate_columns = sorted(candidate_columns)
+    for index, key in enumerate(sorted_candidate_columns, start=1):
         ref = column_refs[key]
+        if progress is not None:
+            progress(index - 1, len(sorted_candidate_columns), f"loading {ref.label}")
         if ref.distinct_count > max_distinct_values:
+            if progress is not None:
+                progress(index, len(sorted_candidate_columns), f"skipped {ref.label}")
             continue
         table = table_by_name[ref.table]
         column = table.c[ref.column]
@@ -261,6 +296,8 @@ def load_distinct_sets(
         }
         if values:
             distinct_sets[key] = values
+        if progress is not None:
+            progress(index, len(sorted_candidate_columns), f"loaded {ref.label}")
     return distinct_sets
 
 
@@ -494,12 +531,17 @@ def render_markdown(
 def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate Markdown schema join links for a database.", prog=prog)
     add_connection_arguments(parser)
-    parser.add_argument("--output", help="Output .md file. Defaults to stdout.")
+    parser.add_argument("--output", help="Output .md file. Defaults to <database>_schema_links.md.")
     parser.add_argument("--include-tables", help="Comma-separated table allowlist.")
     parser.add_argument("--exclude-tables", help="Comma-separated table denylist.")
     parser.add_argument("--containment-threshold", type=float, default=0.8, help="Minimum exact containment for inferred links.")
     parser.add_argument("--max-distinct-values", type=int, default=100_000, help="Maximum distinct values to load per candidate column.")
     return parser
+
+
+def default_output_path(database: str) -> Path:
+    profile_path = default_profile_output_path(database)
+    return profile_path.with_name(f"{profile_path.stem.removesuffix('_profile')}_schema_links.md")
 
 
 def main(argv: list[str] | None = None, prog: str | None = None) -> int:
@@ -514,11 +556,26 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         max_distinct_values=args.max_distinct_values,
     )
     engine = create_engine(url)
-    output = link_schema(engine, options)
-    if args.output:
-        Path(args.output).write_text(output, encoding="utf-8")
+    progress_bar = ProgressBar("Linking", 0)
+
+    def show_progress(current: int, total: int, item: str) -> None:
+        nonlocal progress_bar
+        if progress_bar.total != total:
+            progress_bar.finish()
+            progress_bar = ProgressBar("Linking", total)
+            progress_bar.start(item)
+            return
+        progress_bar.update(current, item)
+
+    try:
+        output = link_schema(engine, options, progress=show_progress)
+    except Exception:
+        progress_bar.finish()
+        raise
     else:
-        sys.stdout.write(output)
+        progress_bar.finish("Schema linking complete")
+    output_path = Path(args.output) if args.output else default_output_path(args.database or os.environ["DB_SNOOPER_DATABASE"])
+    output_path.write_text(output, encoding="utf-8")
     return 0
 
 

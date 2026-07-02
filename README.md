@@ -80,7 +80,7 @@ The `links` command generates a `.md` file containing declared PK/FK links and i
 SQLite example:
 
 ```bash
-uv run db-snooper links --db-type sqlite --database eval-dataset/superhero/superhero.sqlite --output superhero.schema_links.md
+uv run db-snooper links --db-type sqlite --database eval-dataset/superhero/superhero.sqlite
 ```
 
 Environment variable example:
@@ -88,8 +88,10 @@ Environment variable example:
 ```bash
 DB_SNOOPER_DB_TYPE=sqlite \
 DB_SNOOPER_DATABASE=eval-dataset/student_club/student_club.sqlite \
-uv run db-snooper links --output student_club.schema_links.md
+uv run db-snooper links
 ```
+
+By default, `links` writes to `<database>_schema_links.md`, such as `superhero_schema_links.md` or `dbname_schema_links.md`. Pass `--output` to choose a different path.
 
 Useful options:
 
