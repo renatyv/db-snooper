@@ -178,8 +178,10 @@ def infer_links(
 ) -> list[InferredLink]:
     table_by_name = {table.name: table for table in tables}
     declared_pairs = get_declared_column_pairs(declared_links)
-    name_candidates = get_name_candidates(column_refs, declared_pairs, options)
-    candidate_columns = get_distinct_candidate_columns(column_refs, name_candidates, options)
+
+    triaged_refs = get_triaged_refs(column_refs, options)
+    name_candidates = get_name_candidates(conn, table_by_name, triaged_refs, declared_pairs, options)
+    candidate_columns = get_distinct_candidate_columns(triaged_refs, name_candidates, options)
 
     distinct_sets = load_distinct_sets(
         conn,
@@ -189,7 +191,7 @@ def infer_links(
         options.max_distinct_values,
         progress,
     )
-    lsh_candidates = get_lsh_candidates(column_refs, distinct_sets, declared_pairs, options)
+    lsh_candidates = get_lsh_candidates(triaged_refs, distinct_sets, declared_pairs, options)
     candidates = merge_candidates(name_candidates + lsh_candidates)
 
     links: dict[frozenset[tuple[str, str]], InferredLink] = {}
@@ -207,16 +209,19 @@ def infer_links(
                 continue
             if not plausible_direction(source, target, candidate.evidence):
                 continue
+            evidence = tuple(sorted(set(candidate.evidence) | set(get_cardinality_evidence(source, target, options))))
+            if len(evidence) < 3:
+                continue
             key = frozenset({source.key, target.key})
             notes = tuple(sorted(get_notes(source, target, options)))
-            link = InferredLink(source, target, containment, tuple(sorted(candidate.evidence)), notes)
+            link = InferredLink(source, target, containment, evidence, notes)
             existing = links.get(key)
-            if existing is None or link.containment > existing.containment:
+            if existing is None or link_rank_key(link) < link_rank_key(existing):
                 links[key] = link
 
     return sorted(
         links.values(),
-        key=lambda link: (-link.containment, link.source.table, link.source.column, link.target.table, link.target.column),
+        key=link_rank_key,
     )
 
 
@@ -235,15 +240,26 @@ def get_distinct_candidate_columns(
 ) -> set[tuple[str, str]]:
     candidate_columns = {candidate.left.key for candidate in name_candidates} | {candidate.right.key for candidate in name_candidates}
     for ref in column_refs.values():
-        if is_low_cardinality(ref, options):
-            continue
-        if ref.cardinality_ratio >= options.unique_drop_ratio and not ref.is_primary_or_unique:
-            continue
-        candidate_columns.add(ref.key)
+        if is_primary_lsh_target(ref, options):
+            candidate_columns.add(ref.key)
     return candidate_columns
 
 
+def get_triaged_refs(
+    column_refs: dict[tuple[str, str], ColumnRef],
+    options: SchemaLinkOptions,
+) -> dict[tuple[str, str], ColumnRef]:
+    refs: dict[tuple[str, str], ColumnRef] = {}
+    for key, ref in column_refs.items():
+        if ref.cardinality_ratio >= options.unique_drop_ratio and not ref.is_primary_or_unique:
+            continue
+        refs[key] = ref
+    return refs
+
+
 def get_name_candidates(
+    conn: Connection,
+    table_by_name: dict[str, Table],
     column_refs: dict[tuple[str, str], ColumnRef],
     declared_pairs: set[frozenset[tuple[str, str]]],
     options: SchemaLinkOptions,
@@ -256,16 +272,13 @@ def get_name_candidates(
                 continue
             if frozenset({left.key, right.key}) in declared_pairs:
                 continue
-            evidence = get_name_evidence(left, right)
-            if not evidence:
-                if is_low_cardinality(left, options) or is_low_cardinality(right, options):
-                    continue
-                if left.type_group == "numeric" and (left.is_id_like or right.is_id_like):
-                    continue
-                if not (is_moderate_id_target(left, options) and is_moderate_id_target(right, options)):
-                    continue
-                evidence = ("cardinality match",)
-            candidates.append(CandidatePair(left, right, evidence + ("type match",)))
+            name_evidence = get_name_evidence(left, right)
+            if not name_evidence:
+                continue
+            evidence = tuple(dict.fromkeys(name_evidence + get_cardinality_evidence(left, right, options) + ("type match",)))
+            if is_strong_name_candidate(evidence) and not spot_check_overlap(conn, table_by_name, left, right):
+                continue
+            candidates.append(CandidatePair(left, right, evidence))
     return candidates
 
 
@@ -346,7 +359,11 @@ def merge_candidates(candidates: list[CandidatePair]) -> list[CandidatePair]:
             continue
         evidence = tuple(sorted(set(existing.evidence) | set(candidate.evidence)))
         merged[key] = CandidatePair(existing.left, existing.right, evidence)
-    return list(merged.values())
+    return sorted(merged.values(), key=lambda candidate: (candidate.left.key, candidate.right.key))
+
+
+def link_rank_key(link: InferredLink) -> tuple[int, float, str, str, str, str]:
+    return (-len(link.evidence), -link.containment, link.source.table, link.source.column, link.target.table, link.target.column)
 
 
 def plausible_direction(source: ColumnRef, target: ColumnRef, evidence: tuple[str, ...]) -> bool:
@@ -378,6 +395,21 @@ def get_notes(source: ColumnRef, target: ColumnRef, options: SchemaLinkOptions) 
     return notes
 
 
+def get_cardinality_evidence(left: ColumnRef, right: ColumnRef, options: SchemaLinkOptions) -> tuple[str, ...]:
+    evidence: list[str] = []
+    if left.distinct_count == right.distinct_count:
+        evidence.append("same distinct count")
+    elif min(left.distinct_count, right.distinct_count) / max(left.distinct_count, right.distinct_count) >= 0.8:
+        evidence.append("similar distinct counts")
+    if is_low_cardinality(left, options) or is_low_cardinality(right, options):
+        evidence.append("low cardinality")
+    elif left.is_id_like or right.is_id_like:
+        evidence.append("moderate ID-like cardinality")
+    else:
+        evidence.append("moderate cardinality")
+    return tuple(evidence)
+
+
 def get_name_evidence(left: ColumnRef, right: ColumnRef) -> tuple[str, ...]:
     left_name = normalize_name(left.column)
     right_name = normalize_name(right.column)
@@ -398,8 +430,36 @@ def get_name_evidence(left: ColumnRef, right: ColumnRef) -> tuple[str, ...]:
     return tuple(dict.fromkeys(evidence))
 
 
-def is_moderate_id_target(ref: ColumnRef, options: SchemaLinkOptions) -> bool:
+def is_primary_lsh_target(ref: ColumnRef, options: SchemaLinkOptions) -> bool:
     return ref.is_id_like and not is_low_cardinality(ref, options)
+
+
+def is_strong_name_candidate(evidence: tuple[str, ...]) -> bool:
+    return len(set(evidence) & {"name match", "table-name id match", "shared name tokens", "similar names"}) >= 2
+
+
+def spot_check_overlap(
+    conn: Connection,
+    table_by_name: dict[str, Table],
+    left: ColumnRef,
+    right: ColumnRef,
+    limit: int = 50,
+) -> bool:
+    left_values = load_limited_distinct_values(conn, table_by_name[left.table], left.column, limit)
+    right_values = load_limited_distinct_values(conn, table_by_name[right.table], right.column, limit)
+    if not left_values or not right_values:
+        return False
+    return bool(left_values & right_values)
+
+
+def load_limited_distinct_values(conn: Connection, table: Table, column_name: str, limit: int) -> set[Any]:
+    column = table.c[column_name]
+    values = set()
+    for row in conn.execute(select(column).where(column.is_not(None)).distinct().limit(limit)):
+        value = normalize_value(row[0])
+        if value is not None:
+            values.add(value)
+    return values
 
 
 def is_low_cardinality(ref: ColumnRef, options: SchemaLinkOptions) -> bool:
@@ -491,41 +551,39 @@ def render_markdown(
         f"- version: {__version__}",
         f"- dialect: {dialect}",
         f"- database: {database}",
-        f"- url: {url}",
         "",
         "## Declared PK/FK Links",
         "",
     ]
     if declared_links:
         lines.extend([
-            "| From | To | Columns | Confidence | Source |",
-            "|---|---|---|---:|---|",
+            "| From | To |",
+            "|---|---|",
         ])
         for link in declared_links:
             from_label = ", ".join(f"{link.from_table}.{column}" for column in link.from_columns)
             to_label = ", ".join(f"{link.to_table}.{column}" for column in link.to_columns)
-            columns = ", ".join(
-                f"{from_column} -> {to_column}"
-                for from_column, to_column in zip(link.from_columns, link.to_columns, strict=False)
-            )
-            lines.append(f"| {from_label} | {to_label} | {columns} | 1.00 | foreign key |")
+            lines.append(f"| {markdown_cell(from_label)} | {markdown_cell(to_label)} |")
     else:
         lines.append("No declared PK/FK links found.")
 
     lines.extend(["", "## Inferred Links", ""])
     if inferred_links:
         lines.extend([
-            "| From | To | Containment | Evidence | Notes |",
-            "|---|---|---:|---|---|",
+            "| From | To | Evidence |",
+            "|---|---|---|",
         ])
         for link in inferred_links:
             evidence = ", ".join(link.evidence)
-            notes = ", ".join(link.notes)
-            lines.append(f"| {link.source.label} | {link.target.label} | {link.containment:.2f} | {evidence} | {notes} |")
+            lines.append(f"| {markdown_cell(link.source.label)} | {markdown_cell(link.target.label)} | {markdown_cell(evidence)} |")
     else:
         lines.append("No inferred links found.")
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def markdown_cell(value: str) -> str:
+    return value.replace("|", "\\|")
 
 
 def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
