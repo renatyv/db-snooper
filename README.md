@@ -1,145 +1,23 @@
-## DB Snooper
+# DB Snooper
 
-Generate compact, LLM-ready database context with schema profiles and inferred join links.
+DB Snooper generates compact, LLM-ready database context for SQL generation, query debugging, and schema exploration.
 
-The `profile` command generates a `.sql` profile containing DDL, row counts, sampled small tables, and per-column data profiles.
+It inspects an existing database and produces two useful artifacts:
 
-Install dependencies with uv:
+- A SQL profile file with DDL, row counts, sampled small tables, and per-column summaries.
+- A Markdown schema-link report with declared PK/FK relationships and inferred join candidates.
 
-```bash
-uv sync --extra dev
-```
+This is useful when an AI agent, coding assistant, or text-to-SQL pipeline needs reliable database context without dumping the whole database. Instead of guessing table meanings or join paths, the agent can read the generated profile and link report before writing SQL.
 
-Install as a Python package from this checkout:
+## Install
 
-```bash
-uv pip install -e .
-```
+Choose the install path that matches how you want to use DB Snooper.
 
-Build a distributable package:
+### As An Agent Skill
 
-```bash
-uv build
-```
+Use the bundled skill when you want an AI agent to know when and how to run DB Snooper before generating SQL.
 
-Import from Python:
-
-```python
-from db_snooper import generate_profile, generate_schema_links
-
-database_url = "sqlite:///eval-dataset/superhero/superhero.sqlite"
-
-profile_sql = generate_profile(database_url)
-schema_links_md = generate_schema_links(database_url)
-```
-
-For advanced use, pass a SQLAlchemy engine and options:
-
-```python
-from sqlalchemy import create_engine
-from db_snooper import ProfileOptions, SchemaLinkOptions, link_schema, profile_database
-
-engine = create_engine("sqlite:///eval-dataset/superhero/superhero.sqlite")
-
-profile_sql = profile_database(engine, ProfileOptions(sample_row_limit=25))
-schema_links_md = link_schema(engine, SchemaLinkOptions(containment_threshold=0.9))
-```
-
-SQLite example:
-
-```bash
-uv run db-snooper profile --db-type sqlite --database eval-dataset/superhero/superhero.sqlite
-```
-
-PostgreSQL example:
-
-```bash
-uv sync --extra postgres
-uv run db-snooper profile --db-type postgres --database dbname --user user
-```
-
-MySQL example:
-
-```bash
-uv sync --extra mysql
-uv run db-snooper profile --db-type mysql --database dbname --user user
-```
-
-MariaDB example:
-
-```bash
-uv sync --extra mariadb
-uv run db-snooper profile --db-type mariadb --database dbname --user user
-```
-
-DuckDB example:
-
-```bash
-uv sync --extra duckdb
-uv run db-snooper profile --db-type duckdb --database warehouse.duckdb
-```
-
-Connection values can also come from environment variables:
-
-```bash
-DB_SNOOPER_DB_TYPE=sqlite \
-DB_SNOOPER_DATABASE=eval-dataset/student_club/student_club.sqlite \
-uv run db-snooper profile
-```
-
-For server databases, `--host` defaults to `localhost`, `--port` defaults to the database default (`5432` for PostgreSQL and `3306` for MySQL/MariaDB), and the command prompts securely for the password when `DB_SNOOPER_DB_PASSWORD` is not set:
-
-```bash
-DB_SNOOPER_DB_TYPE=postgres \
-DB_SNOOPER_DATABASE=dbname \
-DB_SNOOPER_DB_USER=user \
-DB_SNOOPER_DB_PASSWORD=password \
-uv run db-snooper profile
-```
-
-By default, `profile` writes to `<database>_profile.sql`, such as `superhero_profile.sql` or `dbname_profile.sql`. Pass `--output` to choose a different path.
-
-Useful options:
-
-- `--small-table-threshold 50`: tables with this many rows or fewer are sampled instead of column-profiled.
-- `--sample-row-limit 50`: maximum sampled rows for small tables.
-- `--include-tables table_a,table_b`: only profile selected tables.
-- `--exclude-tables table_c`: skip selected tables.
-
-Sensitive columns whose names contain `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token` are redacted in sampled rows and do not emit value profiles.
-
-## Schema Links
-
-The `links` command generates a `.md` file containing declared PK/FK links and inferred join candidates.
-
-SQLite example:
-
-```bash
-uv run db-snooper links --db-type sqlite --database eval-dataset/superhero/superhero.sqlite
-```
-
-Environment variable example:
-
-```bash
-DB_SNOOPER_DB_TYPE=sqlite \
-DB_SNOOPER_DATABASE=eval-dataset/student_club/student_club.sqlite \
-uv run db-snooper links
-```
-
-By default, `links` writes to `<database>_schema_links.md`, such as `superhero_schema_links.md` or `dbname_schema_links.md`. Pass `--output` to choose a different path.
-
-Useful options:
-
-- `--include-tables table_a,table_b`: only inspect selected tables.
-- `--exclude-tables table_c`: skip selected tables.
-- `--containment-threshold 0.8`: minimum exact containment for inferred links.
-- `--max-distinct-values 100000`: maximum distinct values loaded per candidate column.
-
-## Agent Skill
-
-This repository includes a portable agent skill at `skills/db-snooper-context/SKILL.md` for AI agents that need profiling and schema-linking guidance before generating SQL.
-
-Agents can read the skill directly as Markdown, or agent runtimes can register the `skills/` directory. For opencode, add this to `opencode.json` or `opencode.jsonc`:
+From this repository, register the included `skills/` directory with your agent runtime. For opencode, add this to `opencode.json` or `opencode.jsonc`:
 
 ```json
 {
@@ -150,16 +28,254 @@ Agents can read the skill directly as Markdown, or agent runtimes can register t
 }
 ```
 
-The skill covers when to run `db-snooper profile` and `db-snooper links`, safe credential handling, CLI and Python API recipes, output interpretation, and a downstream text-to-SQL prompt pattern.
+If you installed the CLI, copy the bundled skill into any skills directory you register with your agent:
+
+```bash
+db-snooper skill install ./skills
+```
+
+Then register that directory with your agent runtime. You can also print the bundled skill path:
+
+```bash
+db-snooper skill path
+```
+
+The skill file is `skills/db-snooper-context/SKILL.md`. It covers safe credential handling, when to run `profile` and `links`, how to interpret outputs, and how to pass the generated context to a downstream SQL agent.
+
+### As A CLI App
+
+Install the command-line app from this checkout:
+
+```bash
+uv tool install .
+db-snooper --help
+```
+
+Install the database driver extra you need:
+
+```bash
+uv tool install '.[postgres]' --reinstall
+uv tool install '.[mysql]' --reinstall
+uv tool install '.[mariadb]' --reinstall
+uv tool install '.[duckdb]' --reinstall
+```
+
+If you need multiple drivers in the same CLI install, combine the extras in one command:
+
+```bash
+uv tool install '.[postgres,mysql,duckdb]' --reinstall
+```
+
+During development, you can run the CLI directly from the repository without installing it globally:
+
+```bash
+uv run db-snooper --help
+```
+
+### As A Python Library
+
+Install the library from this checkout:
+
+```bash
+uv pip install .
+```
+
+For editable local development:
+
+```bash
+uv pip install -e .
+```
+
+Then import the simple API:
+
+```python
+from db_snooper import generate_profile, generate_schema_links
+
+database_url = "sqlite:///eval-dataset/superhero/superhero.sqlite"
+
+profile_sql = generate_profile(database_url)
+schema_links_md = generate_schema_links(database_url)
+```
+
+## Quick Start
+
+Run DB Snooper against the included SQLite sample database:
+
+```bash
+uv run db-snooper profile --db-type sqlite --database eval-dataset/superhero/superhero.sqlite
+uv run db-snooper links --db-type sqlite --database eval-dataset/superhero/superhero.sqlite
+```
+
+This creates:
+
+- `superhero_profile.sql`
+- `superhero_schema_links.md`
+
+If you installed DB Snooper as a CLI app, use `db-snooper` instead of `uv run db-snooper`.
+
+## What The Outputs Contain
+
+The profile `.sql` file contains:
+
+- Metadata with db-snooper version, SQL dialect, database name, and a password-hidden URL.
+- `CREATE TABLE` DDL, indexes, and constraints.
+- Total row counts.
+- Deterministic sampled rows for small tables.
+- Per-column null, non-null, distinct, numeric range, median, top-value, and shape summaries for larger tables.
+- Redacted values for sensitive column names containing `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token`.
+
+The schema links `.md` file contains:
+
+- Declared primary-key and foreign-key links from database constraints.
+- Inferred links from name, type, cardinality, and containment evidence.
+- Evidence labels for each inferred join candidate.
+
+Treat inferred links as candidates, not guaranteed joins. Validate them against the user question and the generated profile before writing final SQL.
+
+## Database Examples
+
+### SQLite
+
+```bash
+db-snooper profile --db-type sqlite --database path/to/app.sqlite
+db-snooper links --db-type sqlite --database path/to/app.sqlite
+```
+
+### PostgreSQL
+
+Install the PostgreSQL extra first:
+
+```bash
+uv tool install '.[postgres]' --reinstall
+```
+
+Then connect with flags or environment variables:
+
+```bash
+db-snooper profile --db-type postgres --database app_db --user readonly_user --host localhost --ask-password
+db-snooper links --db-type postgres --database app_db --user readonly_user --host localhost --ask-password
+```
+
+### MySQL
+
+```bash
+uv tool install '.[mysql]' --reinstall
+db-snooper profile --db-type mysql --database app_db --user readonly_user --host localhost --ask-password
+db-snooper links --db-type mysql --database app_db --user readonly_user --host localhost --ask-password
+```
+
+### MariaDB
+
+```bash
+uv tool install '.[mariadb]' --reinstall
+db-snooper profile --db-type mariadb --database app_db --user readonly_user --host localhost --ask-password
+db-snooper links --db-type mariadb --database app_db --user readonly_user --host localhost --ask-password
+```
+
+### DuckDB
+
+```bash
+uv tool install '.[duckdb]' --reinstall
+db-snooper profile --db-type duckdb --database warehouse.duckdb
+db-snooper links --db-type duckdb --database warehouse.duckdb
+```
+
+## Environment Variables
+
+Connection values can come from environment variables instead of flags:
+
+```bash
+DB_SNOOPER_DB_TYPE=sqlite \
+DB_SNOOPER_DATABASE=eval-dataset/student_club/student_club.sqlite \
+db-snooper profile
+```
+
+Supported variables:
+
+- `DB_SNOOPER_DB_TYPE`
+- `DB_SNOOPER_DATABASE`
+- `DB_SNOOPER_DB_HOST`
+- `DB_SNOOPER_DB_PORT`
+- `DB_SNOOPER_DB_USER`
+- `DB_SNOOPER_DB_PASSWORD`
+
+For server databases, `--host` defaults to `localhost`, `--port` defaults to the database default, and DB Snooper securely prompts for a password when `DB_SNOOPER_DB_PASSWORD` is not set.
+
+## Useful Options
+
+Output paths:
+
+```bash
+db-snooper profile --db-type sqlite --database app.sqlite --output app_profile.sql
+db-snooper links --db-type sqlite --database app.sqlite --output app_schema_links.md
+```
+
+Table filters:
+
+```bash
+db-snooper profile --db-type sqlite --database app.sqlite --include-tables users,orders,line_items
+db-snooper links --db-type sqlite --database app.sqlite --exclude-tables audit_log,temp_imports
+```
+
+Profile options:
+
+- `--small-table-threshold 50`: tables with this many rows or fewer are sampled instead of column-profiled.
+- `--sample-row-limit 50`: maximum sampled rows for small tables.
+- `--include-tables table_a,table_b`: only profile selected tables.
+- `--exclude-tables table_c`: skip selected tables.
+
+Schema-link options:
+
+- `--include-tables table_a,table_b`: only inspect selected tables.
+- `--exclude-tables table_c`: skip selected tables.
+- `--containment-threshold 0.8`: minimum exact containment for inferred links.
+- `--max-distinct-values 10000`: maximum distinct values loaded per candidate column.
+
+## Python API
+
+Use the simple helpers when you have a SQLAlchemy URL:
+
+```python
+from db_snooper import generate_profile, generate_schema_links
+
+database_url = "sqlite:///eval-dataset/superhero/superhero.sqlite"
+
+profile_sql = generate_profile(database_url)
+schema_links_md = generate_schema_links(database_url)
+```
+
+Use the lower-level API when you already have a SQLAlchemy engine or need options:
+
+```python
+from sqlalchemy import create_engine
+from db_snooper import ProfileOptions, SchemaLinkOptions, link_schema, profile_database
+
+engine = create_engine("sqlite:///eval-dataset/superhero/superhero.sqlite")
+
+profile_sql = profile_database(
+    engine,
+    ProfileOptions(sample_row_limit=25, include_tables=frozenset({"superhero", "publisher"})),
+)
+schema_links_md = link_schema(
+    engine,
+    SchemaLinkOptions(containment_threshold=0.9),
+)
+```
+
+## Safety Notes
+
+- Prefer a read-only database user.
+- Run against production databases during low-load windows.
+- Use `--include-tables` to narrow large databases.
+- Prefer environment variables or secure prompts for passwords.
+- Do not paste passwords into prompts, logs, generated files, or issue reports.
+- Review generated files before sending them to an external service.
+- Redaction is name-based, so do not assume every sensitive value is automatically removed.
 
 ## License
 
-The source code in this repository is licensed under the [MIT License](LICENSE).
+The source code in this repository is licensed under the MIT License.
 
-The dataset files included under `data/` are derived from
-[birdsql](https://bird-bench.github.io/)
-by The BIRD Team, and are used and redistributed under the
-[Creative Commons Attribution-ShareAlike 4.0 International License (CC BY-SA 4.0)](https://creativecommons.org/licenses/by-sa/4.0/).
+The dataset files included under `eval-dataset/` are derived from [birdsql](https://bird-bench.github.io/) by The BIRD Team, and are used and redistributed under the [Creative Commons Attribution-ShareAlike 4.0 International License (CC BY-SA 4.0)](https://creativecommons.org/licenses/by-sa/4.0/).
 
-These files retain their original CC BY-SA 4.0 terms. Any derivative works
-that include these files must also be distributed under CC BY-SA 4.0.
+These files retain their original CC BY-SA 4.0 terms. Any derivative works that include these files must also be distributed under CC BY-SA 4.0.
