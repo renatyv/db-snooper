@@ -31,7 +31,7 @@ class SchemaLinkOptions:
     low_cardinality_ratio: float = 0.05
     unique_drop_ratio: float = 0.98
     containment_threshold: float = 0.8
-    max_distinct_values: int = 100_000
+    max_distinct_values: int = 10_000
     minhash_permutations: int = 128
 
 
@@ -593,7 +593,7 @@ def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("--include-tables", help="Comma-separated table allowlist.")
     parser.add_argument("--exclude-tables", help="Comma-separated table denylist.")
     parser.add_argument("--containment-threshold", type=float, default=0.8, help="Minimum exact containment for inferred links.")
-    parser.add_argument("--max-distinct-values", type=int, default=100_000, help="Maximum distinct values to load per candidate column.")
+    parser.add_argument("--max-distinct-values", type=int, default=10_000, help="Maximum distinct values to load per candidate column.")
     return parser
 
 
