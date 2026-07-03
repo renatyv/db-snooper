@@ -1,6 +1,6 @@
 ## DB Snooper
 
-Snoop through databases and generate compact LLM-ready SQL context.
+Generate compact, LLM-ready database context with schema profiles and inferred join links.
 
 The `profile` command generates a `.sql` profile containing DDL, row counts, sampled small tables, and per-column data profiles.
 
