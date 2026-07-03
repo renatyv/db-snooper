@@ -135,6 +135,23 @@ Useful options:
 - `--containment-threshold 0.8`: minimum exact containment for inferred links.
 - `--max-distinct-values 100000`: maximum distinct values loaded per candidate column.
 
+## Agent Skill
+
+This repository includes a portable agent skill at `skills/db-snooper-context/SKILL.md` for AI agents that need profiling and schema-linking guidance before generating SQL.
+
+Agents can read the skill directly as Markdown, or agent runtimes can register the `skills/` directory. For opencode, add this to `opencode.json` or `opencode.jsonc`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "skills": {
+    "paths": ["skills"]
+  }
+}
+```
+
+The skill covers when to run `db-snooper profile` and `db-snooper links`, safe credential handling, CLI and Python API recipes, output interpretation, and a downstream text-to-SQL prompt pattern.
+
 ## License
 
 The source code in this repository is licensed under the [MIT License](LICENSE).
