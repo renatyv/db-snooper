@@ -10,6 +10,41 @@ Install dependencies with uv:
 uv sync --extra dev
 ```
 
+Install as a Python package from this checkout:
+
+```bash
+uv pip install -e .
+```
+
+Build a distributable package:
+
+```bash
+uv build
+```
+
+Import from Python:
+
+```python
+from db_snooper import generate_profile, generate_schema_links
+
+database_url = "sqlite:///eval-dataset/superhero/superhero.sqlite"
+
+profile_sql = generate_profile(database_url)
+schema_links_md = generate_schema_links(database_url)
+```
+
+For advanced use, pass a SQLAlchemy engine and options:
+
+```python
+from sqlalchemy import create_engine
+from db_snooper import ProfileOptions, SchemaLinkOptions, link_schema, profile_database
+
+engine = create_engine("sqlite:///eval-dataset/superhero/superhero.sqlite")
+
+profile_sql = profile_database(engine, ProfileOptions(sample_row_limit=25))
+schema_links_md = link_schema(engine, SchemaLinkOptions(containment_threshold=0.9))
+```
+
 SQLite example:
 
 ```bash
