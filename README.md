@@ -121,6 +121,7 @@ The profile `.sql` file contains:
 - `CREATE TABLE` DDL, indexes, and constraints.
 - Total row counts.
 - Deterministic sampled rows for small tables.
+- Latest and random sampled rows for larger tables.
 - Per-column null, non-null, distinct, numeric range, median, top-value, and shape summaries for larger tables.
 - Redacted values for sensitive column names containing `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token`.
 

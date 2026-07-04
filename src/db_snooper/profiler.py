@@ -11,7 +11,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import MetaData, Table, create_engine, func, inspect, literal_column, select, text
+from sqlalchemy import MetaData, Table, create_engine, desc, func, inspect, literal_column, select, text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.schema import CreateIndex, CreateTable, UniqueConstraint
 from sqlalchemy.sql.sqltypes import BigInteger, Float, Integer, Numeric, SmallInteger, String, Text
@@ -126,6 +126,14 @@ def profile_table(conn: Connection, table: Table, options: ProfileOptions) -> li
             lines.append(f"-- row: {json_dumps(row)}")
         return lines
 
+    lines.append(f"-- LATEST_ROWS: {table.name}")
+    for row in latest_rows(conn, table, 3):
+        lines.append(f"-- row: {json_dumps(row)}")
+
+    lines.append(f"-- RANDOM_ROWS: {table.name}")
+    for row in random_rows(conn, table, 5):
+        lines.append(f"-- row: {json_dumps(row)}")
+
     unique_columns = get_unique_column_names(table)
     for column in table.columns:
         lines.extend(profile_column(conn, table, column, int(total_rows), unique_columns))
@@ -135,6 +143,22 @@ def profile_table(conn: Connection, table: Table, options: ProfileOptions) -> li
 def sample_rows(conn: Connection, table: Table, limit: int) -> list[dict[str, Any]]:
     order_columns = list(table.primary_key.columns) or list(table.columns)
     statement = select(table).order_by(*order_columns).limit(limit)
+    return rows_for_statement(conn, table, statement)
+
+
+def latest_rows(conn: Connection, table: Table, limit: int) -> list[dict[str, Any]]:
+    order_columns = list(table.primary_key.columns) or list(table.columns)
+    statement = select(table).order_by(*(desc(column) for column in order_columns)).limit(limit)
+    return rows_for_statement(conn, table, statement)
+
+
+def random_rows(conn: Connection, table: Table, limit: int) -> list[dict[str, Any]]:
+    random_function = func.rand() if conn.dialect.name in {"mysql", "mariadb"} else func.random()
+    statement = select(table).order_by(random_function).limit(limit)
+    return rows_for_statement(conn, table, statement)
+
+
+def rows_for_statement(conn: Connection, table: Table, statement: Any) -> list[dict[str, Any]]:
     rows = []
     for row in conn.execute(statement).mappings():
         output: dict[str, Any] = {}
