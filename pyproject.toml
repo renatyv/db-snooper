@@ -4,9 +4,14 @@ version = "0.1.0"
 description = "Generate compact, LLM-ready database context with schema profiles and inferred join links."
 readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENCE"]
 dependencies = [
     "datasketch>=1.6",
     "sqlalchemy>=2.0",
+]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
 ]
 
 [project.optional-dependencies]
@@ -25,6 +30,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/db_snooper"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/eval-dataset",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
