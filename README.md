@@ -2,6 +2,8 @@
 
 DB Snooper generates compact, LLM-ready database context for SQL generation, query debugging, and schema exploration.
 
+Specification: see [`spec/main.md`](spec/main.md) for the design notes behind profiling, schema linking, and the text-to-SQL pipeline.
+
 It inspects an existing database and produces two useful artifacts:
 
 - A SQL profile file with DDL, row counts, sampled small tables, and per-column summaries.

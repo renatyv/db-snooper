@@ -1,31 +1,24 @@
 # Problem
-To efficiently convert text to analytic SQL queries LLMs need to know a lot about the database and data.
+To efficiently convert text to analytic SQL queries, LLMs need database schema and data context.
 
 # Ideas
 
 ## 1. [Database profiling](profiler.md)
-Build a python script that generates `.sql` profile files for SQLite, MariaDB, MySQL, DuckDB, and PostgreSQL.
+Build a Python script that generates `.sql` profile files for SQLite, MariaDB, MySQL, DuckDB, and PostgreSQL.
 
 ## 2. [Schema linking](schema_linking.md)
-Use the following techniques to generate a separate .md file with ponentially useful paths for JOINs and how fields from different tables can be combined.
+Use the following techniques to generate a separate `.md` file with potentially useful JOIN paths and notes on how fields from different tables can be combined.
 
-## 3. Multiple candidates voting
-When a request to generate SQL is given, generate 3 candidate queries for each question. Introduce variety by changing the LLM's randomization seed and the order of the schema fields in the prompt.
+## 3. [Multiple-candidate voting](text_to_sql_pipeline.md)
+When a request to generate SQL is given, generate three candidate queries for each question. Introduce variety by changing the LLM's randomization seed and the order of the schema fields in the prompt.
 
 # Evals
-Use `eval-dataset/eval.jsonl` to verify if profiler works
-1. Load corresponding SQLite database
-2. Generate the profile using the script
-3. Generate SQL from the query in a subagent with generated profile in the context
-4. Compare the SQL to the `gold`: both SQL queries themselves and the resulting data
+Use `eval-dataset/eval.jsonl` to verify that the profiler works:
+1. Load the corresponding SQLite database.
+2. Generate the profile with the script.
+3. Generate SQL from the query in a subagent with the generated profile in the context.
+4. Compare the SQL to the `gold` query: both the SQL text and the resulting data.
 
-# Technical
-* use python and SQLAlchemy to make profiler as DB-agnostic as possible. pytest for tests
-* use uv to manage dependencies
-* sources in `src/` folder, tests in `test` or `tests`
-* add simple readme how to run the cmd. Examples with sqlite, postgres, mariadb. Use native connectors if possible.
 
-* CLI interface, both profile and schema links
-  - infer host, login, pass from ENV variables and/or CLI arguments.
-  - Use sensible defaults: localhost, infere port from database type, ask user for password if not given in ENV, figure out output profile filename from the database name.
-  - use progress bar to show how profiling and schema linking is going. Maybe even show which tables are currently being pofiled
+## Implementation
+This can be automated using [python implementation](python_impl.md)
