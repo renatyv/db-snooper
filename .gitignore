@@ -9,6 +9,9 @@ venv/
 env/
 ENV/
 
+# private .env
+*.env
+
 # Packaging and build artifacts
 build/
 dist/
