@@ -3,7 +3,7 @@
 - Use Python and SQLAlchemy to make the profiler as database-agnostic as possible. Use pytest for tests.
 - Use `uv` to manage dependencies.
 - Put sources in `src/` and tests in `test` or `tests`.
-- Add a simple README that explains how to run the command. Include examples for SQLite, PostgreSQL, and MariaDB. Use native connectors if possible.
+- Add a simple README that explains how to run the command. Include examples for SQLite, PostgreSQL, and MariaDB. Use non-native (pure python) connectors if possible to simplify use.
 
 - CLI interface: both profile and schema links.
   - Infer host, login, and password from environment variables and/or CLI arguments.
