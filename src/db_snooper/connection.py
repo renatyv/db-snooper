@@ -11,7 +11,7 @@ DRIVER_NAMES = {
     "sqlite": "sqlite",
     "postgres": "postgresql+psycopg",
     "mysql": "mysql+pymysql",
-    "mariadb": "mariadb+mariadbconnector",
+    "mariadb": "mysql+pymysql",
     "duckdb": "duckdb",
 }
 

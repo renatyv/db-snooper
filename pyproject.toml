@@ -1,6 +1,6 @@
 [project]
 name = "db-snooper"
-version = "0.1.0"
+version = "0.0.3"
 description = "Generate compact, LLM-ready database context with schema profiles and inferred join links."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -9,17 +9,20 @@ license-files = ["LICENCE"]
 dependencies = [
     "datasketch>=1.6",
     "sqlalchemy>=2.0",
+    "pymysql>=1.1",
+    "psycopg>=3.2",
+    "duckdb-engine>=0.13"
 ]
 classifiers = [
     "License :: OSI Approved :: MIT License",
+
+]
+authors = [
+  {name = "Renat Iuldashev", email = "renatyv@gmail.com"}
 ]
 
 [project.optional-dependencies]
-postgres = ["psycopg[binary]>=3.2"]
-mysql = ["pymysql>=1.1"]
 mariadb = ["mariadb>=1.1"]
-duckdb = ["duckdb-engine>=0.13"]
-dev = ["pytest>=8.0"]
 
 [project.scripts]
 db-snooper = "db_snooper.cli:main"
