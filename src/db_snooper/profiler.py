@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import re
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import MetaData, Table, create_engine, desc, func, inspect, literal_column, select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.schema import CreateIndex, CreateTable, UniqueConstraint
 from sqlalchemy.sql.sqltypes import BigInteger, Float, Integer, Numeric, SmallInteger, String, Text
@@ -147,8 +149,9 @@ def profile_table(conn: Connection, table: Table, options: ProfileOptions) -> li
         lines.append(f"-- row: {json_dumps(row)}")
 
     unique_columns = get_unique_column_names(table)
+    indexed_columns = get_indexed_column_names(table)
     for column in table.columns:
-        lines.extend(profile_column(conn, table, column, int(total_rows), unique_columns))
+        lines.extend(profile_column(conn, table, column, int(total_rows), unique_columns, indexed_columns))
     return lines
 
 
@@ -181,77 +184,197 @@ def rows_for_statement(conn: Connection, table: Table, statement: Any) -> list[d
     return rows
 
 
-def profile_column(conn: Connection, table: Table, column: Any, total_rows: int, unique_columns: set[str]) -> list[str]:
-    non_nulls = conn.execute(select(func.count(column)).select_from(table)).scalar_one()
-    nulls = total_rows - int(non_nulls)
-    if non_nulls == 0:
-        return [f"-- {column.name}: all NULL"]
+def profile_column(
+    conn: Connection,
+    table: Table,
+    column: Any,
+    total_rows: int,
+    unique_columns: set[str],
+    indexed_columns: set[str],
+) -> list[str]:
+    indexed = column.name in indexed_columns
+    counts_available = total_rows <= 5_000_000 or indexed
+    non_nulls: int | None = None
+    nulls: int | None = None
+    if counts_available:
+        non_nulls = int(conn.execute(select(func.count(column)).select_from(table)).scalar_one())
+        nulls = total_rows - non_nulls
+        if non_nulls == 0:
+            return [f"-- {column.name}: all NULL"]
 
-    distinct_count = conn.execute(select(func.count(func.distinct(column))).select_from(table)).scalar_one()
-    distinct_count = int(distinct_count)
+    distinct_available = total_rows <= 100_000 or (total_rows <= 1_000_000 and indexed)
+    distinct_count: int | None = None
+    if distinct_available:
+        distinct_count = int(
+            conn.execute(select(func.count(func.distinct(column))).select_from(table)).scalar_one()
+        )
+
     unique_identifier = column.name in unique_columns or (
-        nulls == 0 and distinct_count == non_nulls and is_identifier_name(column.name)
+        distinct_count is not None
+        and nulls == 0
+        and non_nulls is not None
+        and distinct_count == non_nulls
+        and is_identifier_name(column.name)
     )
     sensitive = is_sensitive(column.name)
 
+    summary = []
     if unique_identifier:
-        line = f"-- {column.name}: unique values={distinct_count}"
-        if is_numeric(column):
-            min_value, max_value = conn.execute(select(func.min(column), func.max(column)).select_from(table)).one()
-            line += f", range={format_value(min_value)}..{format_value(max_value)}"
-        return [line]
+        summary.append("unique identifier")
+    if counts_available:
+        summary.extend((f"nulls={nulls}", f"non_nulls={non_nulls}"))
+    if distinct_count is not None:
+        summary.append(f"distinct={distinct_count}")
+    lines = [f"-- {column.name}: {', '.join(summary) if summary else 'profile metrics skipped'}"]
 
-    lines = [f"-- {column.name}: nulls={nulls}, non_nulls={non_nulls}, distinct={distinct_count}"]
     if is_numeric(column):
-        min_value, max_value = conn.execute(select(func.min(column), func.max(column)).select_from(table)).one()
-        median = median_value(conn, table, column, int(non_nulls))
-        lines.append(
-            f"-- {column.name} numeric: min={format_value(min_value)}, "
-            f"median={format_value(median)}, max={format_value(max_value)}"
-        )
+        numeric = []
+        if total_rows <= 5_000_000 or indexed:
+            min_value, max_value = conn.execute(
+                select(func.min(column), func.max(column)).select_from(table)
+            ).one()
+            numeric.extend((f"min={format_value(min_value)}", f"max={format_value(max_value)}"))
+        if total_rows <= 1_000_000 or (total_rows <= 10_000_000 and indexed):
+            average = conn.execute(select(func.avg(column)).select_from(table)).scalar_one()
+            numeric.append(f"average={format_value(average)}")
+        if total_rows < 100_000:
+            median = median_value(conn, table, column)
+            numeric.append(f"median={format_value(median)}")
+        if numeric:
+            lines.append(f"-- {column.name} numeric: {', '.join(numeric)}")
 
-    if not sensitive:
-        top_values = get_top_values(conn, table, column)
-        if distinct_count < 20:
+    if not sensitive and not unique_identifier:
+        top_values: list[tuple[Any, int]] = []
+        if distinct_count is not None and distinct_count < 20:
+            top_values = get_value_counts(conn, table, column, limit=None)
             lines.append(f"-- {column.name} values: {format_value_counts(top_values)}")
-        elif top_values and top_values[0][1] > 1:
-            lines.append(f"-- {column.name} top_values: {format_value_counts(top_values)}")
+        elif total_rows <= 100_000 and indexed:
+            top_values = get_value_counts(conn, table, column, limit=10)
+            if top_values and top_values[0][1] > 1:
+                lines.append(f"-- {column.name} top_values: {format_value_counts(top_values)}")
+        elif total_rows > 100_000 and indexed:
+            top_values = get_catalog_top_values(conn, table, column, total_rows)
+            if top_values:
+                lines.append(f"-- {column.name} top_values (catalog): {format_value_counts(top_values)}")
         shape_summary = get_shape_summary(column, distinct_count, top_values)
         if shape_summary:
             lines.append(f"-- {column.name} shape: {shape_summary}")
     return lines
 
 
-def median_value(conn: Connection, table: Table, column: Any, non_nulls: int) -> Any:
+def median_value(conn: Connection, table: Table, column: Any) -> Any:
+    if conn.dialect.name == "postgresql":
+        return conn.execute(
+            select(func.percentile_cont(0.5).within_group(column)).where(column.is_not(None))
+        ).scalar_one()
+    if conn.dialect.name == "mariadb":
+        percentile = func.percentile_cont(0.5).within_group(column).over()
+        return conn.execute(
+            select(percentile).select_from(table).where(column.is_not(None)).limit(1)
+        ).scalar_one()
+
     ordered = (
         select(
             column.label("value"),
             func.row_number().over(order_by=column).label("rn"),
+            func.count().over().label("n"),
         )
         .where(column.is_not(None))
         .subquery()
     )
-    lower = (non_nulls + 1) // 2
-    upper = (non_nulls + 2) // 2
     return conn.execute(
-        select(func.avg(ordered.c.value)).where(ordered.c.rn.in_([lower, upper]))
+        select(func.avg(ordered.c.value)).where(
+            ordered.c.rn.in_(
+                [func.floor((ordered.c.n + 1) / 2), func.floor((ordered.c.n + 2) / 2)]
+            )
+        )
     ).scalar_one()
 
 
-def get_top_values(conn: Connection, table: Table, column: Any) -> list[tuple[Any, int]]:
-    rows = conn.execute(
-        select(column, func.count().label("count"))
+def get_value_counts(conn: Connection, table: Table, column: Any, limit: int | None) -> list[tuple[Any, int]]:
+    statement = (
+        select(column, func.count().label("value_count"))
         .select_from(table)
         .where(column.is_not(None))
         .group_by(column)
-        .order_by(literal_column("count").desc(), column.asc())
-        .limit(10)
+        .order_by(literal_column("value_count").desc(), column.asc())
     )
+    if limit is not None:
+        statement = statement.limit(limit)
+    rows = conn.execute(statement)
     return [(row[0], int(row[1])) for row in rows]
 
 
+def get_catalog_top_values(
+    conn: Connection, table: Table, column: Any, total_rows: int
+) -> list[tuple[Any, int]]:
+    try:
+        with conn.begin_nested():
+            if conn.dialect.name == "postgresql":
+                row = conn.execute(
+                    text(
+                        "SELECT most_common_vals::text, most_common_freqs "
+                        "FROM pg_stats WHERE schemaname = :schema AND tablename = :table "
+                        "AND attname = :column"
+                    ),
+                    {
+                        "schema": table.schema or conn.dialect.default_schema_name,
+                        "table": table.name,
+                        "column": column.name,
+                    },
+                ).one_or_none()
+                if not row or not row[0] or not row[1]:
+                    return []
+                values = parse_postgres_array(row[0])
+                return [
+                    (value, max(1, round(float(frequency) * total_rows)))
+                    for value, frequency in zip(values, row[1])
+                ][:10]
+            if conn.dialect.name == "mysql":
+                histogram = conn.execute(
+                    text(
+                        "SELECT HISTOGRAM FROM information_schema.COLUMN_STATISTICS "
+                        "WHERE SCHEMA_NAME = :schema AND TABLE_NAME = :table AND COLUMN_NAME = :column"
+                    ),
+                    {
+                        "schema": table.schema or conn.dialect.default_schema_name,
+                        "table": table.name,
+                        "column": column.name,
+                    },
+                ).scalar_one_or_none()
+                return mysql_histogram_values(histogram, total_rows)
+    except SQLAlchemyError:
+        return []
+    return []
+
+
+def parse_postgres_array(value: str) -> list[str]:
+    # pg_stats exposes anyarray, which drivers cannot decode without knowing the
+    # underlying type. Its text form uses standard PostgreSQL array quoting.
+    if not (value.startswith("{") and value.endswith("}")):
+        return []
+    return next(csv.reader([value[1:-1]], delimiter=",", quotechar='"', escapechar="\\"))
+
+
+def mysql_histogram_values(histogram: Any, total_rows: int) -> list[tuple[Any, int]]:
+    if isinstance(histogram, str):
+        histogram = json.loads(histogram)
+    if not isinstance(histogram, dict) or histogram.get("histogram-type") != "singleton":
+        return []
+    previous = 0.0
+    values = []
+    for value, cumulative_frequency in histogram.get("buckets", []):
+        frequency = float(cumulative_frequency) - previous
+        previous = float(cumulative_frequency)
+        values.append((value, max(1, round(frequency * total_rows))))
+    return sorted(values, key=lambda item: (-item[1], str(item[0])))[:10]
+
+
 def get_unique_column_names(table: Table) -> set[str]:
-    unique_columns = {column.name for column in table.primary_key.columns}
+    primary_key_columns = list(table.primary_key.columns)
+    unique_columns = (
+        {primary_key_columns[0].name} if len(primary_key_columns) == 1 else set()
+    )
     for constraint in table.constraints:
         if isinstance(constraint, UniqueConstraint) and len(constraint.columns) == 1:
             unique_columns.update(column.name for column in constraint.columns)
@@ -261,12 +384,22 @@ def get_unique_column_names(table: Table) -> set[str]:
     return unique_columns
 
 
+def get_indexed_column_names(table: Table) -> set[str]:
+    indexed = {column.name for column in table.primary_key.columns}
+    for index in table.indexes:
+        indexed.update(column.name for column in index.columns)
+    for constraint in table.constraints:
+        if isinstance(constraint, UniqueConstraint):
+            indexed.update(column.name for column in constraint.columns)
+    return indexed
+
+
 def get_shape_summary(
     column: Any,
-    distinct_count: int,
+    distinct_count: int | None,
     top_values: list[tuple[Any, int]],
 ) -> str | None:
-    if not isinstance(column.type, (String, Text)) or distinct_count <= 1:
+    if not isinstance(column.type, (String, Text)) or distinct_count is None or distinct_count <= 1:
         return None
     values = [value for value, _count in top_values[:10] if isinstance(value, str)]
     if not values:

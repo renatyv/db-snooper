@@ -11,12 +11,14 @@ For each table:
    - If a table has more than 50 rows, include the number of rows, three latest rows, and five random rows. Also generate per-column profiles:
      - If a column is all `NULL`, emit a one-line `all NULL` summary.
      - If a column is a unique identifier, omit top values and value-shape metadata.
-     - If a column has fewer than 20 distinct values, include all non-sensitive values. Otherwise, include per-column profile data:
-       - `NULL` and non-`NULL` counts.
-       - Distinct value count.
-       - Min, max, and median for numeric columns.
-       - Top 10 most frequent values with counts when they are informative.
-       - Value shape only when it adds meaningful information and does not duplicate type or DDL metadata.
+     - If a column has fewer than 20 distinct values, include all non-sensitive values.
+     - If n_rows >= 20, include per-column profile data:
+       - `NULL` and non-`NULL` counts. If n_rows > 5M, then compute it only if column is indexed
+       - Min, max for numeric columns. If n_rows > 5M, then compute it only if column is indexed
+       - average for numeric columns. If n_rows > 1M, then compute it only if column is indexed. If 1M < n_rows <= 10M, compute only if indexed. If n_rows > 10M, skip.
+       - Median for numeric columns if number of n_rows < 100_000. Use native PERCENTILE_CONT for Postgres & mariadb, while MySQL needs ROW_NUMBER()/NTILE() over a full sort
+       - Distinct value count. n_rows ≤ 100K: exact, COUNT(DISTINCT col); n_rows > 100K and ≤ 1M: exact, only if indexed; n_rows > 1M: don't run
+       - Top 10 most frequent values with counts when they are informative. Only if n_rows <= 100K and indexed. n_rows > 100K and indexed - read most_common_vals/most_common_freqs from pg_stats, or the equivalent histogram buckets in MySQL/MariaDB, if present. rows > 100K and unindexed, or no catalog stats available: skip.
 3. LLM summarization (done separately): A short summary, or minimal profile, identifies the meaning and format of each field and table. If source code is available, use it to produce better summaries.
 
 
