@@ -13,19 +13,15 @@ This is useful when an AI agent, coding assistant, or text-to-SQL pipeline needs
 
 ## Quick Start
 
-Run DB Snooper against the included SQLite sample database:
-
+Profile your local MySQL dababase
 ```bash
-uv run db-snooper profile --db-type sqlite --database eval-dataset/superhero/superhero.sqlite
-uv run db-snooper links --db-type sqlite --database eval-dataset/superhero/superhero.sqlite
+ uvx db-snooper profile --db-type mysql --user user --password password --database db
+ uvx db-snooper links --db-type mysql --user user --password password --database db
 ```
 
 This creates:
-
-- `superhero_profile.sql`
-- `superhero_schema_links.md`
-
-If you installed DB Snooper as a CLI app, use `db-snooper` instead of `uv run db-snooper`.
+- `db_profile.sql`
+- `db_schema_links.md`
 
 ## What The Outputs Contain
 
@@ -50,47 +46,31 @@ Treat inferred links as candidates, not guaranteed joins. Validate them against 
 ## Database Examples
 
 ### SQLite
-
 ```bash
 db-snooper profile --db-type sqlite --database path/to/app.sqlite
 db-snooper links --db-type sqlite --database path/to/app.sqlite
 ```
 
 ### PostgreSQL
-
-Install the PostgreSQL extra first:
-
-```bash
-uv tool install '.[postgres]' --reinstall
-```
-
-Then connect with flags or environment variables:
-
 ```bash
 db-snooper profile --db-type postgres --database app_db --user readonly_user --host localhost --ask-password
 db-snooper links --db-type postgres --database app_db --user readonly_user --host localhost --ask-password
 ```
 
 ### MySQL
-
 ```bash
-uv tool install '.[mysql]' --reinstall
 db-snooper profile --db-type mysql --database app_db --user readonly_user --host localhost --ask-password
 db-snooper links --db-type mysql --database app_db --user readonly_user --host localhost --ask-password
 ```
 
 ### MariaDB
-
 ```bash
-uv tool install '.[mariadb]' --reinstall
 db-snooper profile --db-type mariadb --database app_db --user readonly_user --host localhost --ask-password
 db-snooper links --db-type mariadb --database app_db --user readonly_user --host localhost --ask-password
 ```
 
 ### DuckDB
-
 ```bash
-uv tool install '.[duckdb]' --reinstall
 db-snooper profile --db-type duckdb --database warehouse.duckdb
 db-snooper links --db-type duckdb --database warehouse.duckdb
 ```
@@ -116,13 +96,12 @@ Supported variables:
 
 For server databases, `--host` defaults to `localhost`, `--port` defaults to the database default, and DB Snooper securely prompts for a password when `DB_SNOOPER_DB_PASSWORD` is not set.
 
-## Useful Options
-
-Output paths:
+## Help
 
 ```bash
-db-snooper profile --db-type sqlite --database app.sqlite --output app_profile.sql
-db-snooper links --db-type sqlite --database app.sqlite --output app_schema_links.md
+db-snooper -h
+db-snooper profile -h
+db-snooper links -h
 ```
 
 Table filters:
@@ -176,16 +155,6 @@ schema_links_md = link_schema(
     SchemaLinkOptions(containment_threshold=0.9),
 )
 ```
-
-## Safety Notes
-
-- Prefer a read-only database user.
-- Run against production databases during low-load windows.
-- Use `--include-tables` to narrow large databases.
-- Prefer environment variables or secure prompts for passwords.
-- Do not paste passwords into prompts, logs, generated files, or issue reports.
-- Review generated files before sending them to an external service.
-- Redaction is name-based, so do not assume every sensitive value is automatically removed.
 
 ## License
 
