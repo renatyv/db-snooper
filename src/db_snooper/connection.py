@@ -5,6 +5,8 @@ import getpass
 import os
 from typing import Any
 
+from sqlalchemy import inspect
+from sqlalchemy.engine import Engine
 from sqlalchemy.engine import URL
 
 DRIVER_NAMES = {
@@ -47,6 +49,11 @@ def add_connection_arguments(parser: argparse.ArgumentParser) -> None:
         help="Database password. Defaults to DB_SNOOPER_DB_PASSWORD, then a secure prompt for server databases.",
     )
     parser.add_argument("--ask-password", action="store_true", help="Prompt securely for the database password.")
+    parser.add_argument(
+        "--schema",
+        default=None,
+        help="Schema to inspect. Defaults to DB_SNOOPER_SCHEMA; without either, all user schemas are inspected.",
+    )
 
 
 def resolve_database_url(args: argparse.Namespace, parser: argparse.ArgumentParser) -> URL:
@@ -73,6 +80,32 @@ def resolve_database_url(args: argparse.Namespace, parser: argparse.ArgumentPars
     if args.ask_password or password is None:
         password = getpass.getpass("Database password: ")
     return URL.create(DRIVER_NAMES[db_type], username=user, password=password, host=host, port=port, database=database)
+
+
+def resolve_schema(args: argparse.Namespace) -> str | None:
+    """Return an explicitly selected schema, if any."""
+    return _value(args, "schema", "DB_SNOOPER_SCHEMA")
+
+
+def list_schemas(engine: Engine, selected_schema: str | None = None) -> list[str]:
+    """List non-system schemas that contain tables for this database connection."""
+    if selected_schema:
+        return [selected_schema]
+
+    dialect = engine.dialect.name
+    if dialect == "sqlite":
+        return ["main"]
+    if dialect in {"mysql", "mariadb"}:
+        return [engine.dialect.default_schema_name or engine.url.database or "main"]
+
+    system_schemas = {"information_schema", "pg_catalog", "pg_toast"}
+    inspector = inspect(engine)
+    schemas = [
+        schema
+        for schema in inspector.get_schema_names()
+        if schema not in system_schemas and inspector.get_table_names(schema=schema)
+    ]
+    return sorted(schemas)
 
 
 def _value(args: argparse.Namespace, arg_name: str, env_name: str) -> Any:

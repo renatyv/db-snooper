@@ -2,7 +2,7 @@
 
 For each database create a separate folder with subfolders for each of the schemas.
 
-If there are more than 20 tables per schema, generate separate files for each of them. Otherwise, generate a single profile.
+Generate a single `db_/schema.sql` profile per schema by default. When requested with `--per-table`, generate separate files `db_/schema/table.sql`.
 
 For each table:
 1. Generate `CREATE TABLE` DDL with all indexes and constraints.
@@ -21,11 +21,18 @@ For each table:
 
 
 ## Result example
+
+Single profile for a schema `main` in database `dive_sim`
+
+`dive_sim/main.sql`
+
 ```SQL
 -- db-snooper
--- version: 0.1.0
+-- version: 0.0.1
+-- generated_at_utc: 2026-07-22T12:34:56.789012Z
 -- dialect: mysql
 -- database: dive_sim
+-- schema: main
 
 CREATE TABLE `action_status_history` (
   `id` int(11) NOT NULL AUTO_INCREMENT,

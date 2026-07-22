@@ -4,7 +4,7 @@ import argparse
 import os
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time
 from decimal import Decimal
 from difflib import SequenceMatcher
@@ -18,9 +18,9 @@ from sqlalchemy.schema import UniqueConstraint
 from sqlalchemy.sql.sqltypes import BigInteger, Date, DateTime, Float, Integer, Numeric, SmallInteger, String, Text, Time
 
 from db_snooper import __version__
-from db_snooper.connection import add_connection_arguments, resolve_database_url
+from db_snooper.connection import add_connection_arguments, list_schemas, resolve_database_url, resolve_schema
 from db_snooper.profiler import default_output_path as default_profile_output_path
-from db_snooper.profiler import is_sensitive, parse_table_set
+from db_snooper.profiler import is_sensitive, output_component, parse_table_set
 from db_snooper.progress import ProgressBar
 
 
@@ -33,6 +33,7 @@ class SchemaLinkOptions:
     containment_threshold: float = 0.8
     max_distinct_values: int = 10_000
     minhash_permutations: int = 128
+    schema: str | None = None
 
 
 @dataclass(frozen=True)
@@ -90,7 +91,7 @@ SchemaLinkProgress = Callable[[int, int, str], None]
 
 def link_schema(engine: Engine, options: SchemaLinkOptions, progress: SchemaLinkProgress | None = None) -> str:
     inspector = inspect(engine)
-    table_names = sorted(inspector.get_table_names())
+    table_names = sorted(inspector.get_table_names(schema=options.schema))
     if options.include_tables is not None:
         table_names = [table for table in table_names if table in options.include_tables]
     table_names = [table for table in table_names if table not in options.exclude_tables]
@@ -104,14 +105,14 @@ def link_schema(engine: Engine, options: SchemaLinkOptions, progress: SchemaLink
         for index, table_name in enumerate(table_names, start=1):
             if progress is not None:
                 progress(index - 1, len(table_names), f"reflecting {table_name}")
-            tables.append(Table(table_name, metadata, autoload_with=conn))
+            tables.append(Table(table_name, metadata, schema=options.schema, autoload_with=conn))
             if progress is not None:
                 progress(index, len(table_names), f"reflected {table_name}")
         declared_links = collect_declared_links(tables, set(table_names))
         column_refs = collect_column_refs(conn, tables, options, progress)
         inferred_links = infer_links(conn, tables, column_refs, declared_links, options, progress)
 
-    return render_markdown(engine.dialect.name, database, url, declared_links, inferred_links)
+    return render_markdown(engine.dialect.name, database, options.schema or engine.dialect.default_schema_name or "", url, declared_links, inferred_links)
 
 
 def collect_declared_links(tables: list[Table], selected_tables: set[str]) -> list[DeclaredLink]:
@@ -541,6 +542,7 @@ def stable_hash_value(value: Any) -> bytes:
 def render_markdown(
     dialect: str,
     database: str,
+    schema: str,
     url: str,
     declared_links: list[DeclaredLink],
     inferred_links: list[InferredLink],
@@ -551,6 +553,7 @@ def render_markdown(
         f"- version: {__version__}",
         f"- dialect: {dialect}",
         f"- database: {database}",
+        f"- schema: {schema}",
         "",
         "## Declared PK/FK Links",
         "",
@@ -589,7 +592,7 @@ def markdown_cell(value: str) -> str:
 def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate Markdown schema join links for a database.", prog=prog)
     add_connection_arguments(parser)
-    parser.add_argument("--output", help="Output .md file. Defaults to <database>_schema_links.md.")
+    parser.add_argument("--output", help="Output directory. Defaults to <database>/.")
     parser.add_argument("--include-tables", help="Comma-separated table allowlist.")
     parser.add_argument("--exclude-tables", help="Comma-separated table denylist.")
     parser.add_argument("--containment-threshold", type=float, default=0.8, help="Minimum exact containment for inferred links.")
@@ -598,8 +601,7 @@ def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
 
 
 def default_output_path(database: str) -> Path:
-    profile_path = default_profile_output_path(database)
-    return profile_path.with_name(f"{profile_path.stem.removesuffix('_profile')}_schema_links.md")
+    return default_profile_output_path(database)
 
 
 def main(argv: list[str] | None = None, prog: str | None = None) -> int:
@@ -612,12 +614,15 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         exclude_tables=parse_table_set(args.exclude_tables) or frozenset(),
         containment_threshold=args.containment_threshold,
         max_distinct_values=args.max_distinct_values,
+        schema=resolve_schema(args),
     )
     engine = create_engine(url)
     progress_bar = ProgressBar("Linking", 0)
+    active_schema = ""
 
     def show_progress(current: int, total: int, item: str) -> None:
         nonlocal progress_bar
+        item = f"{active_schema}: {item}"
         if progress_bar.total != total:
             progress_bar.finish()
             progress_bar = ProgressBar("Linking", total)
@@ -625,15 +630,20 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
             return
         progress_bar.update(current, item)
 
+    schemas = list_schemas(engine, options.schema)
+    output_dir = Path(args.output) if args.output else default_output_path(args.database or os.environ["DB_SNOOPER_DATABASE"])
     try:
-        output = link_schema(engine, options, progress=show_progress)
+        for schema in schemas:
+            active_schema = schema
+            schema_options = replace(options, schema=schema)
+            output = link_schema(engine, schema_options, progress=show_progress)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / f"{output_component(schema)}_schema_links.md").write_text(output, encoding="utf-8")
     except Exception:
         progress_bar.finish()
         raise
     else:
         progress_bar.finish("Schema linking complete")
-    output_path = Path(args.output) if args.output else default_output_path(args.database or os.environ["DB_SNOOPER_DATABASE"])
-    output_path.write_text(output, encoding="utf-8")
     return 0
 
 

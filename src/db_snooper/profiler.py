@@ -5,8 +5,8 @@ import json
 import os
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import date, datetime, time
+from dataclasses import dataclass, replace
+from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -17,7 +17,7 @@ from sqlalchemy.schema import CreateIndex, CreateTable, UniqueConstraint
 from sqlalchemy.sql.sqltypes import BigInteger, Float, Integer, Numeric, SmallInteger, String, Text
 
 from db_snooper import __version__
-from db_snooper.connection import add_connection_arguments, resolve_database_url
+from db_snooper.connection import add_connection_arguments, list_schemas, resolve_database_url, resolve_schema
 from db_snooper.progress import ProgressBar
 
 SENSITIVE_NAME_PARTS = ("password", "passwd", "pwd", "hash", "salt", "secret", "token")
@@ -29,26 +29,38 @@ class ProfileOptions:
     sample_row_limit: int = 50
     include_tables: frozenset[str] | None = None
     exclude_tables: frozenset[str] = frozenset()
+    schema: str | None = None
 
 
 ProfileProgress = Callable[[int, int, str], None]
 
 
-def profile_database(engine: Engine, options: ProfileOptions, progress: ProfileProgress | None = None) -> str:
+def list_schema_tables(engine: Engine, options: ProfileOptions) -> list[str]:
     inspector = inspect(engine)
-    tables = sorted(inspector.get_table_names())
+    tables = sorted(inspector.get_table_names(schema=options.schema))
     if options.include_tables is not None:
         tables = [table for table in tables if table in options.include_tables]
     tables = [table for table in tables if table not in options.exclude_tables]
+    return tables
 
-    url = engine.url.render_as_string(hide_password=True)
+
+def profile_database(
+    engine: Engine,
+    options: ProfileOptions,
+    progress: ProfileProgress | None = None,
+    table_names: list[str] | None = None,
+) -> str:
+    tables = table_names if table_names is not None else list_schema_tables(engine, options)
+
     database = engine.url.database or ""
+    generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     lines = [
         "-- db-snooper",
         f"-- version: {__version__}",
+        f"-- generated_at_utc: {generated_at}",
         f"-- dialect: {engine.dialect.name}",
         f"-- database: {database}",
-        f"-- url: {url}",
+        f"-- schema: {options.schema or engine.dialect.default_schema_name or ''}",
         "",
     ]
 
@@ -57,7 +69,7 @@ def profile_database(engine: Engine, options: ProfileOptions, progress: ProfileP
         for index, table_name in enumerate(tables, start=1):
             if progress is not None:
                 progress(index - 1, len(tables), table_name)
-            table = Table(table_name, metadata, autoload_with=conn)
+            table = Table(table_name, metadata, schema=options.schema, autoload_with=conn)
             ddl = get_table_ddl(conn, table)
             lines.extend(ddl)
             if lines[-1] != "":
@@ -343,15 +355,21 @@ def parse_table_set(value: str | None) -> frozenset[str] | None:
 def default_output_path(database: str) -> Path:
     name = Path(database).name
     db_name = Path(name).stem or name
-    return Path(f"{db_name}_profile.sql")
+    return Path(db_name)
+
+
+def output_component(value: str) -> str:
+    """Map database object names to a single safe output path component."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip(".") or "unnamed"
 
 
 def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate a SQL profile for a database.", prog=prog)
     add_connection_arguments(parser)
-    parser.add_argument("--output", help="Output .sql file. Defaults to <database>_profile.sql.")
+    parser.add_argument("--output", help="Output directory. Defaults to <database>/.")
     parser.add_argument("--sample-row-limit", type=int, default=50, help="Maximum sampled rows for small tables.")
     parser.add_argument("--small-table-threshold", type=int, default=50, help="Rows at or below this count are sampled.")
+    parser.add_argument("--per-table", action="store_true", help="Write one .sql profile per table instead of one schema profile.")
     parser.add_argument("--include-tables", help="Comma-separated table allowlist.")
     parser.add_argument("--exclude-tables", help="Comma-separated table denylist.")
     return parser
@@ -367,27 +385,43 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         sample_row_limit=args.sample_row_limit,
         include_tables=parse_table_set(args.include_tables),
         exclude_tables=parse_table_set(args.exclude_tables) or frozenset(),
+        schema=resolve_schema(args),
     )
     engine = create_engine(url)
     progress_bar = ProgressBar("Profiling", 0)
+    active_schema = ""
 
     def show_progress(current: int, total: int, table_name: str) -> None:
         nonlocal progress_bar
+        item = f"{active_schema}: {table_name}"
         if progress_bar.total != total:
             progress_bar = ProgressBar("Profiling", total)
-            progress_bar.start(f"profiling {table_name}")
+            progress_bar.start(f"profiling {item}")
             return
-        progress_bar.update(current, f"profiling {table_name}" if current < total else f"profiled {table_name}")
+        progress_bar.update(current, f"profiling {item}" if current < total else f"profiled {item}")
 
+    schemas = list_schemas(engine, options.schema)
+    output_dir = Path(args.output) if args.output else default_output_path(args.database or os.environ["DB_SNOOPER_DATABASE"])
     try:
-        output = profile_database(engine, options, progress=show_progress)
+        for schema in schemas:
+            active_schema = schema
+            schema_options = replace(options, schema=schema)
+            tables = list_schema_tables(engine, schema_options)
+            schema_dir = output_dir / output_component(schema)
+            if args.per_table:
+                schema_dir.mkdir(parents=True, exist_ok=True)
+                for table_name in tables:
+                    table_output = profile_database(engine, schema_options, progress=show_progress, table_names=[table_name])
+                    (schema_dir / f"{output_component(table_name)}.sql").write_text(table_output, encoding="utf-8")
+            else:
+                output = profile_database(engine, schema_options, progress=show_progress, table_names=tables)
+                output_dir.mkdir(parents=True, exist_ok=True)
+                (output_dir / f"{output_component(schema)}.sql").write_text(output, encoding="utf-8")
     except Exception:
         progress_bar.finish()
         raise
     else:
         progress_bar.finish("Profiling complete")
-    output_path = Path(args.output) if args.output else default_output_path(args.database or os.environ["DB_SNOOPER_DATABASE"])
-    output_path.write_text(output, encoding="utf-8")
     return 0
 
 

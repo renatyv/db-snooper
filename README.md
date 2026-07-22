@@ -9,22 +9,24 @@ It inspects an existing database and produces two useful artifacts:
 - A SQL profile file with DDL, row counts, sampled small tables, and per-column summaries.
 - A Markdown schema-link report with declared PK/FK relationships and inferred join candidates.
 
+Outputs are organized by database. Each schema receives `<database>/<schema>.sql` by default; pass `--per-table` to write one `<database>/<schema>/<table>.sql` profile per table. Schema links are written as `<database>/<schema>_schema_links.md`.
+
 This is useful when an AI agent, coding assistant, or text-to-SQL pipeline needs reliable database context without dumping the whole database. Instead of guessing table meanings or join paths, the agent can read the generated profile and link report before writing SQL.
 
 ## Quick Start
 
-Profile your local MySQL dababase
+Profile your local MySQL dababase without installing the whole library
 ```bash
- uvx db-snooper profile --db-type mysql --user user --password password --database db --schema sch
+ uvx db-snooper profile --db-type mysql --user user --password password --database db --schema sch --port 3306
 ```
 
-This creates a folder `db/sch` with profile `db/sch/profile.sql`
+This creates `db/sch.sql` and `db/sch_schema_links.md`. Use `--schema` to generate artifacts for only one schema.
 
 ## What The Outputs Contain
 
 The profile `.sql` file contains:
 
-- Metadata with db-snooper version, SQL dialect, database name, and a password-hidden URL.
+- Metadata with db-snooper version, UTC generation timestamp, SQL dialect, database name, and schema.
 - `CREATE TABLE` DDL, indexes, and constraints.
 - Total row counts.
 - Deterministic sampled rows for small tables.
@@ -51,24 +53,24 @@ db-snooper links --db-type sqlite --database path/to/app.sqlite
 ### PostgreSQL
 Profile
 ```bash
-db-snooper profile --db-type postgres --database app_db --schema sch --user readonly_user --host localhost --ask-password
+db-snooper profile --db-type postgres --database app_db --schema sch --user readonly_user --host localhost --port 5432 --ask-password
 ```
 
 Schema links
 ```bash
-db-snooper links --db-type postgres --database app_db --schema sch  --user readonly_user --host localhost --ask-password
+db-snooper links --db-type postgres --database app_db --schema sch  --user readonly_user --host localhost --port 5432 --ask-password
 ```
 
 ### MySQL
 ```bash
-db-snooper profile --db-type mysql --database app_db --user readonly_user --host localhost --ask-password
-db-snooper links --db-type mysql --database app_db --user readonly_user --host localhost --ask-password
+db-snooper profile --db-type mysql --database app_db --user readonly_user --host localhost --port 3306 --ask-password
+db-snooper links --db-type mysql --database app_db --user readonly_user --host localhost --port 3306 --ask-password
 ```
 
 ### MariaDB
 ```bash
-db-snooper profile --db-type mariadb --database app_db --user readonly_user --host localhost --ask-password
-db-snooper links --db-type mariadb --database app_db --user readonly_user --host localhost --ask-password
+db-snooper profile --db-type mariadb --database app_db --user readonly_user --host localhost --port 3306 --ask-password
+db-snooper links --db-type mariadb --database app_db --user readonly_user --host localhost --port 3306 --ask-password
 ```
 
 ### DuckDB
@@ -95,6 +97,7 @@ Supported variables:
 - `DB_SNOOPER_DB_PORT`
 - `DB_SNOOPER_DB_USER`
 - `DB_SNOOPER_DB_PASSWORD`
+- `DB_SNOOPER_SCHEMA`
 
 For server databases, `--host` defaults to `localhost`, `--port` defaults to the database default, and DB Snooper securely prompts for a password when `DB_SNOOPER_DB_PASSWORD` is not set.
 
@@ -113,12 +116,20 @@ db-snooper profile --db-type sqlite --database app.sqlite --include-tables users
 db-snooper links --db-type sqlite --database app.sqlite --exclude-tables audit_log,temp_imports
 ```
 
+Schema filter:
+
+```bash
+db-snooper profile --db-type postgres --database app_db --schema reporting --user readonly_user --port 5432 --ask-password
+DB_SNOOPER_SCHEMA=reporting db-snooper links --db-type postgres --database app_db --user readonly_user --port 5432 --ask-password
+```
+
 Profile options:
 
 - `--small-table-threshold 50`: tables with this many rows or fewer are sampled instead of column-profiled.
 - `--sample-row-limit 50`: maximum sampled rows for small tables.
 - `--include-tables table_a,table_b`: only profile selected tables.
 - `--exclude-tables table_c`: skip selected tables.
+- `--per-table`: generate one `.sql` profile for each table instead of a single schema profile.
 
 Schema-link options:
 

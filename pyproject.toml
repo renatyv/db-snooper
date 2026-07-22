@@ -1,6 +1,6 @@
 [project]
 name = "db-snooper"
-version = "0.0.1"
+version = "0.0.2"
 description = "Generate compact, LLM-ready database context with schema profiles and inferred join links."
 readme = "README.md"
 requires-python = ">=3.11"

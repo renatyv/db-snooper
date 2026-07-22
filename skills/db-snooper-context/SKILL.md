@@ -22,7 +22,8 @@ Use this skill to generate compact, LLM-ready database context before writing or
 - Database name or file path.
 - Optional server connection details: host, port, user, and password.
 - Optional table filters: `--include-tables` and `--exclude-tables`.
-- Optional output paths for the generated profile and schema links.
+- Optional schema filter: `--schema` or `DB_SNOOPER_SCHEMA`.
+- Optional output directory for the generated profile and schema links.
 
 Prefer environment variables or secure prompts for passwords. Do not print passwords in logs, prompts, generated files, or summaries.
 
@@ -34,6 +35,7 @@ Supported environment variables:
 - `DB_SNOOPER_DB_PORT`
 - `DB_SNOOPER_DB_USER`
 - `DB_SNOOPER_DB_PASSWORD`
+- `DB_SNOOPER_SCHEMA`
 
 ## Workflow
 
@@ -54,6 +56,6 @@ SQLite examples:
 ```bash
 db-snooper profile --db-type sqlite --database eval-dataset/superhero/superhero.sqlite
 db-snooper links --db-type sqlite --database eval-dataset/superhero/superhero.sqlite
-db-snooper profile --db-type sqlite --database eval-dataset/superhero/superhero.sqlite --output superhero_profile.sql
-db-snooper links --db-type sqlite --database eval-dataset/superhero/superhero.sqlite --output superhero_schema_links.md
+db-snooper profile --db-type sqlite --database eval-dataset/superhero/superhero.sqlite --output superhero_context
+db-snooper links --db-type sqlite --database eval-dataset/superhero/superhero.sqlite --output superhero_context
 ```
