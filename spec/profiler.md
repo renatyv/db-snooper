@@ -1,5 +1,9 @@
 # How the Profiler Should Work
 
+For each database create a separate folder with subfolders for each of the schemas.
+
+If there are more than 20 tables per schema, generate separate files for each of them. Otherwise, generate a single profile.
+
 For each table:
 1. Generate `CREATE TABLE` DDL with all indexes and constraints.
 2. Generate a data profile.
@@ -13,7 +17,7 @@ For each table:
        - Min, max, and median for numeric columns.
        - Top 10 most frequent values with counts when they are informative.
        - Value shape only when it adds meaningful information and does not duplicate type or DDL metadata.
-3. LLM summarization: A short summary, or minimal profile, identifies the meaning and format of each field and table. If source code is available, use it to produce better summaries.
+3. LLM summarization (done separately): A short summary, or minimal profile, identifies the meaning and format of each field and table. If source code is available, use it to produce better summaries.
 
 
 ## Result example

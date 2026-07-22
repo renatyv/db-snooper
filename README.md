@@ -15,13 +15,10 @@ This is useful when an AI agent, coding assistant, or text-to-SQL pipeline needs
 
 Profile your local MySQL dababase
 ```bash
- uvx db-snooper profile --db-type mysql --user user --password password --database db
- uvx db-snooper links --db-type mysql --user user --password password --database db
+ uvx db-snooper profile --db-type mysql --user user --password password --database db --schema sch
 ```
 
-This creates:
-- `db_profile.sql`
-- `db_schema_links.md`
+This creates a folder `db/sch` with profile `db/sch/profile.sql`
 
 ## What The Outputs Contain
 
@@ -52,9 +49,14 @@ db-snooper links --db-type sqlite --database path/to/app.sqlite
 ```
 
 ### PostgreSQL
+Profile
 ```bash
-db-snooper profile --db-type postgres --database app_db --user readonly_user --host localhost --ask-password
-db-snooper links --db-type postgres --database app_db --user readonly_user --host localhost --ask-password
+db-snooper profile --db-type postgres --database app_db --schema sch --user readonly_user --host localhost --ask-password
+```
+
+Schema links
+```bash
+db-snooper links --db-type postgres --database app_db --schema sch  --user readonly_user --host localhost --ask-password
 ```
 
 ### MySQL
@@ -71,8 +73,8 @@ db-snooper links --db-type mariadb --database app_db --user readonly_user --host
 
 ### DuckDB
 ```bash
-db-snooper profile --db-type duckdb --database warehouse.duckdb
-db-snooper links --db-type duckdb --database warehouse.duckdb
+db-snooper profile --db-type duckdb --database warehouse.duckdb --schema sch
+db-snooper links --db-type duckdb --database warehouse.duckdb --schema sch
 ```
 
 ## Environment Variables
