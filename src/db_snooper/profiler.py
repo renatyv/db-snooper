@@ -82,7 +82,11 @@ def profile_database(
             lines.extend(ddl)
             if lines[-1] != "":
                 lines.append("")
-            lines.extend(profile_table(conn, table, options))
+            def report_column(column_name: str) -> None:
+                if progress is not None:
+                    progress(index - 1, len(tables), f"{table_name} ({column_name})")
+
+            lines.extend(profile_table(conn, table, options, report_column=report_column))
             lines.append("")
             lines.append("")
             if progress is not None:
@@ -229,7 +233,12 @@ def profile_table_from_stats(table: Table, estimate: int) -> list[str]:
     ]
 
 
-def profile_table(conn: Connection, table: Table, options: ProfileOptions) -> list[str]:
+def profile_table(
+    conn: Connection,
+    table: Table,
+    options: ProfileOptions,
+    report_column: Callable[[str], None] | None = None,
+) -> list[str]:
     estimate = estimate_row_count(conn, table)
     if estimate is not None and estimate >= options.large_table_threshold:
         return profile_table_from_stats(table, estimate)
@@ -253,6 +262,8 @@ def profile_table(conn: Connection, table: Table, options: ProfileOptions) -> li
     unique_columns = get_unique_column_names(table)
     indexed_columns = get_indexed_column_names(table)
     for column in table.columns:
+        if report_column is not None:
+            report_column(column.name)
         lines.extend(profile_column(conn, table, column, int(total_rows), unique_columns, indexed_columns))
     return lines
 
