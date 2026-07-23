@@ -126,6 +126,7 @@ DB_SNOOPER_SCHEMA=reporting db-snooper links --db-type postgres --database app_d
 Profile options:
 
 - `--small-table-threshold 50`: tables with this many rows or fewer are sampled instead of column-profiled.
+- `--large-table-threshold 100000000`: tables whose catalog row estimate is at/above this count are profiled from internal database stats only. `COUNT(*)`, sampled rows, and per-column queries are skipped because they would be too slow on hundreds of millions of rows; the output shows an approximate row count instead.
 - `--sample-row-limit 50`: maximum sampled rows for small tables.
 - `--include-tables table_a,table_b`: only profile selected tables.
 - `--exclude-tables table_c`: skip selected tables.

@@ -24,11 +24,17 @@ from db_snooper.progress import ProgressBar
 
 SENSITIVE_NAME_PARTS = ("password", "passwd", "pwd", "hash", "salt", "secret", "token")
 
+# Tables whose catalog row estimate is at/above this count are profiled from
+# internal database stats only: COUNT(*) and all per-column aggregations are
+# skipped because they would be far too slow. "Hundreds of millions or more".
+LARGE_TABLE_THRESHOLD = 100_000_000
+
 
 @dataclass(frozen=True)
 class ProfileOptions:
     small_table_threshold: int = 50
     sample_row_limit: int = 50
+    large_table_threshold: int = LARGE_TABLE_THRESHOLD
     include_tables: frozenset[str] | None = None
     exclude_tables: frozenset[str] = frozenset()
     schema: str | None = None
@@ -130,7 +136,103 @@ def get_reflected_ddl(conn: Connection, table: Table) -> list[str]:
     return lines
 
 
+def estimate_row_count(conn: Connection, table: Table) -> int | None:
+    """Return a cheap catalog row-count estimate, or ``None`` if unavailable.
+
+    Used to decide whether a full ``COUNT(*)`` scan is affordable. Any failure
+    (missing stats table, stale/unknown marker, parse error) collapses to
+    ``None`` so the caller falls back to an exact count.
+    """
+    dialect = conn.dialect.name
+    schema = table.schema or conn.dialect.default_schema_name
+    try:
+        if dialect == "postgresql":
+            return _postgres_row_estimate(conn, table.name, schema)
+        if dialect in {"mysql", "mariadb"}:
+            return _mysql_row_estimate(conn, table.name, schema)
+        if dialect == "duckdb":
+            return _duckdb_row_estimate(conn, table.name, schema)
+        if dialect == "sqlite":
+            return _sqlite_row_estimate(conn, table.name)
+    except SQLAlchemyError:
+        return None
+    return None
+
+
+def _postgres_row_estimate(conn: Connection, table_name: str, schema: str | None) -> int | None:
+    row = conn.execute(
+        text(
+            "SELECT c.reltuples::bigint FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE c.relname = :table AND n.nspname = :schema"
+        ),
+        {"table": table_name, "schema": schema or "public"},
+    ).one_or_none()
+    if not row or row[0] is None or int(row[0]) < 0:
+        return None
+    return int(row[0])
+
+
+def _mysql_row_estimate(conn: Connection, table_name: str, schema: str | None) -> int | None:
+    schema_name = schema or conn.dialect.default_schema_name
+    if not schema_name:
+        return None
+    value = conn.execute(
+        text(
+            "SELECT TABLE_ROWS FROM information_schema.TABLES "
+            "WHERE TABLE_SCHEMA = :schema AND TABLE_NAME = :table"
+        ),
+        {"schema": schema_name, "table": table_name},
+    ).scalar_one_or_none()
+    if value is None:
+        return None
+    return int(value)
+
+
+def _duckdb_row_estimate(conn: Connection, table_name: str, schema: str | None) -> int | None:
+    schema_name = schema or "main"
+    value = conn.execute(
+        text(
+            "SELECT estimated_size FROM duckdb_tables() "
+            "WHERE schema_name = :schema AND table_name = :table"
+        ),
+        {"schema": schema_name, "table": table_name},
+    ).scalar_one_or_none()
+    if value is None or int(value) < 0:
+        return None
+    return int(value)
+
+
+def _sqlite_row_estimate(conn: Connection, table_name: str) -> int | None:
+    # sqlite_stat1 only exists after ANALYZE. The stat string is "N d1 d2 ..."
+    # where N is the estimated number of rows in the table.
+    stat = conn.execute(
+        text("SELECT stat FROM sqlite_stat1 WHERE tbl = :table LIMIT 1"),
+        {"table": table_name},
+    ).scalar_one_or_none()
+    if not stat:
+        return None
+    first = str(stat).split()[0]
+    try:
+        count = int(first)
+    except ValueError:
+        return None
+    return count if count >= 0 else None
+
+
+def profile_table_from_stats(table: Table, estimate: int) -> list[str]:
+    # DDL (emitted separately by profile_database) already lists the columns,
+    # so no further queries are needed here.
+    return [
+        f"-- total rows\u2248{estimate} "
+        "(estimated from catalog stats; row/column profiling skipped)"
+    ]
+
+
 def profile_table(conn: Connection, table: Table, options: ProfileOptions) -> list[str]:
+    estimate = estimate_row_count(conn, table)
+    if estimate is not None and estimate >= options.large_table_threshold:
+        return profile_table_from_stats(table, estimate)
     total_rows = conn.execute(select(func.count()).select_from(table)).scalar_one()
     lines = [f"-- total rows={total_rows}"]
     if total_rows <= options.small_table_threshold:
@@ -502,6 +604,16 @@ def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("--output", help="Output directory. Defaults to <database>/.")
     parser.add_argument("--sample-row-limit", type=int, default=50, help="Maximum sampled rows for small tables.")
     parser.add_argument("--small-table-threshold", type=int, default=50, help="Rows at or below this count are sampled.")
+    parser.add_argument(
+        "--large-table-threshold",
+        type=int,
+        default=LARGE_TABLE_THRESHOLD,
+        help=(
+            "Tables whose catalog row estimate is at/above this count are profiled "
+            "from internal stats only; COUNT(*) and per-column queries are skipped. "
+            f"Default {LARGE_TABLE_THRESHOLD}."
+        ),
+    )
     parser.add_argument("--per-table", action="store_true", help="Write one .sql profile per table instead of one schema profile.")
     parser.add_argument("--include-tables", help="Comma-separated table allowlist.")
     parser.add_argument("--exclude-tables", help="Comma-separated table denylist.")
@@ -511,11 +623,14 @@ def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     parser = build_arg_parser(prog=prog)
     args = parser.parse_args(argv)
+    if args.large_table_threshold < 1:
+        parser.error("--large-table-threshold must be a positive integer")
     url = resolve_database_url(args, parser)
 
     options = ProfileOptions(
         small_table_threshold=args.small_table_threshold,
         sample_row_limit=args.sample_row_limit,
+        large_table_threshold=args.large_table_threshold,
         include_tables=parse_table_set(args.include_tables),
         exclude_tables=parse_table_set(args.exclude_tables) or frozenset(),
         schema=resolve_schema(args),
