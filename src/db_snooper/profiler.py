@@ -19,8 +19,10 @@ from sqlalchemy.schema import CreateIndex, CreateTable, UniqueConstraint
 from sqlalchemy.sql.sqltypes import BigInteger, Float, Integer, Numeric, SmallInteger, String, Text
 
 from db_snooper import __version__
+from db_snooper import query_timeout
 from db_snooper.connection import add_connection_arguments, list_schemas, resolve_database_url, resolve_schema
 from db_snooper.progress import ProgressBar
+from db_snooper.query_timeout import DEFAULT_QUERY_TIMEOUT
 
 SENSITIVE_NAME_PARTS = ("password", "passwd", "pwd", "hash", "salt", "secret", "token")
 
@@ -35,6 +37,7 @@ class ProfileOptions:
     small_table_threshold: int = 50
     sample_row_limit: int = 50
     large_table_threshold: int = LARGE_TABLE_THRESHOLD
+    query_timeout: int = DEFAULT_QUERY_TIMEOUT
     include_tables: frozenset[str] | None = None
     exclude_tables: frozenset[str] = frozenset()
     schema: str | None = None
@@ -73,6 +76,7 @@ def profile_database(
     ]
 
     with engine.connect() as conn:
+        query_timeout.apply_query_timeout(conn, options.query_timeout)
         metadata = MetaData()
         for index, table_name in enumerate(tables, start=1):
             if progress is not None:
@@ -242,21 +246,36 @@ def profile_table(
     estimate = estimate_row_count(conn, table)
     if estimate is not None and estimate >= options.large_table_threshold:
         return profile_table_from_stats(table, estimate)
-    total_rows = conn.execute(select(func.count()).select_from(table)).scalar_one()
+    try:
+        total_rows = query_timeout.execute(conn, select(func.count()).select_from(table)).scalar_one()
+    except query_timeout.QueryTimeout:
+        return [f"-- {table.name}: skipped (row count query timeout)"]
     lines = [f"-- total rows={total_rows}"]
     if total_rows <= options.small_table_threshold:
         marker = "ALL_ROWS" if total_rows <= options.sample_row_limit else "SAMPLED_ROWS"
         lines.append(f"-- {marker}: {table.name}")
-        for row in sample_rows(conn, table, options.sample_row_limit):
+        try:
+            sampled = sample_rows(conn, table, options.sample_row_limit)
+        except query_timeout.QueryTimeout:
+            sampled = []
+        for row in sampled:
             lines.append(f"-- row: {json_dumps(row)}")
         return lines
 
     lines.append(f"-- LATEST_ROWS: {table.name}")
-    for row in latest_rows(conn, table, 3):
+    try:
+        latest = latest_rows(conn, table, 3)
+    except query_timeout.QueryTimeout:
+        latest = []
+    for row in latest:
         lines.append(f"-- row: {json_dumps(row)}")
 
     lines.append(f"-- RANDOM_ROWS: {table.name}")
-    for row in random_rows(conn, table, 5):
+    try:
+        random_sample = random_rows(conn, table, 5)
+    except query_timeout.QueryTimeout:
+        random_sample = []
+    for row in random_sample:
         lines.append(f"-- row: {json_dumps(row)}")
 
     unique_columns = get_unique_column_names(table)
@@ -264,7 +283,17 @@ def profile_table(
     for column in table.columns:
         if report_column is not None:
             report_column(column.name)
-        lines.extend(profile_column(conn, table, column, int(total_rows), unique_columns, indexed_columns))
+        lines.extend(
+            profile_column(
+                conn,
+                table,
+                column,
+                int(total_rows),
+                unique_columns,
+                indexed_columns,
+                options.query_timeout,
+            )
+        )
     return lines
 
 
@@ -288,7 +317,7 @@ def random_rows(conn: Connection, table: Table, limit: int) -> list[dict[str, An
 
 def rows_for_statement(conn: Connection, table: Table, statement: Any) -> list[dict[str, Any]]:
     rows = []
-    for row in conn.execute(statement).mappings():
+    for row in query_timeout.execute(conn, statement).mappings():
         output: dict[str, Any] = {}
         for column in table.columns:
             value = row[column.name]
@@ -304,23 +333,40 @@ def profile_column(
     total_rows: int,
     unique_columns: set[str],
     indexed_columns: set[str],
+    timeout_seconds: int,
 ) -> list[str]:
     indexed = column.name in indexed_columns
     counts_available = total_rows <= 5_000_000 or indexed
     non_nulls: int | None = None
     nulls: int | None = None
+    skipped: list[str] = []
     if counts_available:
-        non_nulls = int(conn.execute(select(func.count(column)).select_from(table)).scalar_one())
-        nulls = total_rows - non_nulls
-        if non_nulls == 0:
-            return [f"-- {column.name}: all NULL"]
+        try:
+            non_nulls = int(
+                query_timeout.execute(conn, select(func.count(column)).select_from(table)).scalar_one()
+            )
+        except query_timeout.QueryTimeout:
+            non_nulls = None
+            skipped.append("null/non-null counts")
+        if non_nulls is not None:
+            nulls = total_rows - non_nulls
+            if non_nulls == 0:
+                lines = [f"-- {column.name}: all NULL"]
+                lines.extend(_skipped_metric_lines(column.name, skipped, timeout_seconds))
+                return lines
 
     distinct_available = total_rows <= 100_000 or (total_rows <= 1_000_000 and indexed)
     distinct_count: int | None = None
     if distinct_available:
-        distinct_count = int(
-            conn.execute(select(func.count(func.distinct(column))).select_from(table)).scalar_one()
-        )
+        try:
+            distinct_count = int(
+                query_timeout.execute(
+                    conn, select(func.count(func.distinct(column))).select_from(table)
+                ).scalar_one()
+            )
+        except query_timeout.QueryTimeout:
+            distinct_count = None
+            skipped.append("distinct count")
 
     unique_identifier = column.name in unique_columns or (
         distinct_count is not None
@@ -334,7 +380,7 @@ def profile_column(
     summary = []
     if unique_identifier:
         summary.append("unique identifier")
-    if counts_available:
+    if non_nulls is not None:
         summary.extend((f"nulls={nulls}", f"non_nulls={non_nulls}"))
     if distinct_count is not None:
         summary.append(f"distinct={distinct_count}")
@@ -343,28 +389,45 @@ def profile_column(
     if is_numeric(column):
         numeric = []
         if total_rows <= 5_000_000 or indexed:
-            min_value, max_value = conn.execute(
-                select(func.min(column), func.max(column)).select_from(table)
-            ).one()
-            numeric.extend((f"min={format_value(min_value)}", f"max={format_value(max_value)}"))
+            try:
+                min_value, max_value = query_timeout.execute(
+                    conn, select(func.min(column), func.max(column)).select_from(table)
+                ).one()
+                numeric.extend((f"min={format_value(min_value)}", f"max={format_value(max_value)}"))
+            except query_timeout.QueryTimeout:
+                skipped.append("min/max")
         if total_rows <= 1_000_000 or (total_rows <= 10_000_000 and indexed):
-            average = conn.execute(select(func.avg(column)).select_from(table)).scalar_one()
-            numeric.append(f"average={format_value(average)}")
+            try:
+                average = query_timeout.execute(
+                    conn, select(func.avg(column)).select_from(table)
+                ).scalar_one()
+                numeric.append(f"average={format_value(average)}")
+            except query_timeout.QueryTimeout:
+                skipped.append("average")
         if total_rows < 100_000:
-            median = median_value(conn, table, column)
-            numeric.append(f"median={format_value(median)}")
+            try:
+                median = median_value(conn, table, column)
+                numeric.append(f"median={format_value(median)}")
+            except query_timeout.QueryTimeout:
+                skipped.append("median")
         if numeric:
             lines.append(f"-- {column.name} numeric: {', '.join(numeric)}")
 
     if not sensitive and not unique_identifier:
         top_values: list[tuple[Any, int]] = []
         if distinct_count is not None and distinct_count < 20:
-            top_values = get_value_counts(conn, table, column, limit=None)
-            lines.append(f"-- {column.name} values: {format_value_counts(top_values)}")
+            try:
+                top_values = get_value_counts(conn, table, column, limit=None)
+                lines.append(f"-- {column.name} values: {format_value_counts(top_values)}")
+            except query_timeout.QueryTimeout:
+                skipped.append("value counts")
         elif total_rows <= 100_000 and indexed:
-            top_values = get_value_counts(conn, table, column, limit=10)
-            if top_values and top_values[0][1] > 1:
-                lines.append(f"-- {column.name} top_values: {format_value_counts(top_values)}")
+            try:
+                top_values = get_value_counts(conn, table, column, limit=10)
+                if top_values and top_values[0][1] > 1:
+                    lines.append(f"-- {column.name} top_values: {format_value_counts(top_values)}")
+            except query_timeout.QueryTimeout:
+                skipped.append("top values")
         elif total_rows > 100_000 and indexed:
             top_values = get_catalog_top_values(conn, table, column, total_rows)
             if top_values:
@@ -372,18 +435,30 @@ def profile_column(
         shape_summary = get_shape_summary(column, distinct_count, top_values)
         if shape_summary:
             lines.append(f"-- {column.name} shape: {shape_summary}")
+    lines.extend(_skipped_metric_lines(column.name, skipped, timeout_seconds))
     return lines
+
+
+def _skipped_metric_lines(column_name: str, skipped: list[str], timeout_seconds: int) -> list[str]:
+    if not skipped or timeout_seconds <= 0:
+        return []
+    return [
+        f"-- {column_name} {metric}: skipped (query timeout > {timeout_seconds}s)"
+        for metric in skipped
+    ]
 
 
 def median_value(conn: Connection, table: Table, column: Any) -> Any:
     if conn.dialect.name == "postgresql":
-        return conn.execute(
-            select(func.percentile_cont(0.5).within_group(column)).where(column.is_not(None))
+        return query_timeout.execute(
+            conn,
+            select(func.percentile_cont(0.5).within_group(column)).where(column.is_not(None)),
         ).scalar_one()
     if conn.dialect.name == "mariadb":
         percentile = func.percentile_cont(0.5).within_group(column).over()
-        return conn.execute(
-            select(percentile).select_from(table).where(column.is_not(None)).limit(1)
+        return query_timeout.execute(
+            conn,
+            select(percentile).select_from(table).where(column.is_not(None)).limit(1),
         ).scalar_one()
 
     ordered = (
@@ -395,12 +470,13 @@ def median_value(conn: Connection, table: Table, column: Any) -> Any:
         .where(column.is_not(None))
         .subquery()
     )
-    return conn.execute(
+    return query_timeout.execute(
+        conn,
         select(func.avg(ordered.c.value)).where(
             ordered.c.rn.in_(
                 [func.floor((ordered.c.n + 1) / 2), func.floor((ordered.c.n + 2) / 2)]
             )
-        )
+        ),
     ).scalar_one()
 
 
@@ -414,7 +490,7 @@ def get_value_counts(conn: Connection, table: Table, column: Any, limit: int | N
     )
     if limit is not None:
         statement = statement.limit(limit)
-    rows = conn.execute(statement)
+    rows = query_timeout.execute(conn, statement)
     return [(row[0], int(row[1])) for row in rows]
 
 
@@ -625,6 +701,16 @@ def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
             f"Default {LARGE_TABLE_THRESHOLD}."
         ),
     )
+    parser.add_argument(
+        "--query-timeout",
+        type=int,
+        default=DEFAULT_QUERY_TIMEOUT,
+        help=(
+            "Abort any profiling query that runs longer than this many seconds, skip the "
+            "affected metric, and continue. 0 disables. Applies to PostgreSQL/MySQL/MariaDB "
+            f"(SQLite/DuckDB have no native support). Default {DEFAULT_QUERY_TIMEOUT}."
+        ),
+    )
     parser.add_argument("--per-table", action="store_true", help="Write one .sql profile per table instead of one schema profile.")
     parser.add_argument("--include-tables", help="Comma-separated table allowlist.")
     parser.add_argument("--exclude-tables", help="Comma-separated table denylist.")
@@ -636,12 +722,15 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     args = parser.parse_args(argv)
     if args.large_table_threshold < 1:
         parser.error("--large-table-threshold must be a positive integer")
+    if args.query_timeout < 0:
+        parser.error("--query-timeout must be a non-negative integer")
     url = resolve_database_url(args, parser)
 
     options = ProfileOptions(
         small_table_threshold=args.small_table_threshold,
         sample_row_limit=args.sample_row_limit,
         large_table_threshold=args.large_table_threshold,
+        query_timeout=args.query_timeout,
         include_tables=parse_table_set(args.include_tables),
         exclude_tables=parse_table_set(args.exclude_tables) or frozenset(),
         schema=resolve_schema(args),

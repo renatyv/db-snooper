@@ -18,10 +18,19 @@ from sqlalchemy.schema import UniqueConstraint
 from sqlalchemy.sql.sqltypes import BigInteger, Date, DateTime, Float, Integer, Numeric, SmallInteger, String, Text, Time
 
 from db_snooper import __version__
+from db_snooper import query_timeout
 from db_snooper.connection import add_connection_arguments, list_schemas, resolve_database_url, resolve_schema
-from db_snooper.profiler import default_output_path as default_profile_output_path
-from db_snooper.profiler import is_sensitive, output_component, parse_table_set
+from db_snooper.profiler import (
+    LARGE_TABLE_THRESHOLD,
+    default_output_path as default_profile_output_path,
+    estimate_row_count,
+    get_indexed_column_names,
+    is_sensitive,
+    output_component,
+    parse_table_set,
+)
 from db_snooper.progress import ProgressBar
+from db_snooper.query_timeout import DEFAULT_QUERY_TIMEOUT
 
 
 @dataclass(frozen=True)
@@ -33,6 +42,7 @@ class SchemaLinkOptions:
     containment_threshold: float = 0.8
     max_distinct_values: int = 10_000
     minhash_permutations: int = 128
+    query_timeout: int = DEFAULT_QUERY_TIMEOUT
     schema: str | None = None
 
 
@@ -100,6 +110,7 @@ def link_schema(engine: Engine, options: SchemaLinkOptions, progress: SchemaLink
     database = engine.url.database or ""
 
     with engine.connect() as conn:
+        query_timeout.apply_query_timeout(conn, options.query_timeout)
         metadata = MetaData()
         tables = []
         for index, table_name in enumerate(table_names, start=1):
@@ -138,35 +149,94 @@ def collect_column_refs(
     progress: SchemaLinkProgress | None = None,
 ) -> dict[tuple[str, str], ColumnRef]:
     refs: dict[tuple[str, str], ColumnRef] = {}
-    row_counts = {table.name: int(conn.execute(select(func.count()).select_from(table)).scalar_one()) for table in tables}
+    row_counts = _load_row_counts(conn, tables)
     for index, table in enumerate(tables, start=1):
         if progress is not None:
             progress(index - 1, len(tables), f"inspecting {table.name}")
+        total_rows = row_counts[table.name]
         unique_columns = get_unique_column_names(table)
+        indexed_columns = get_indexed_column_names(table)
         for column in table.columns:
             if is_sensitive(column.name):
                 continue
             type_group = get_type_group(column)
             if type_group == "other":
                 continue
-            non_nulls = int(conn.execute(select(func.count(column)).select_from(table)).scalar_one())
-            if non_nulls == 0:
-                continue
-            distinct_count = int(conn.execute(select(func.count(func.distinct(column))).select_from(table)).scalar_one())
-            ref = ColumnRef(
-                table=table.name,
-                column=column.name,
-                type_group=type_group,
-                is_primary_or_unique=column.name in unique_columns,
-                is_id_like=is_id_like(column.name),
-                total_rows=row_counts[table.name],
-                non_nulls=non_nulls,
-                distinct_count=distinct_count,
-            )
-            refs[ref.key] = ref
+            ref = _build_column_ref(conn, table, column, total_rows, type_group, unique_columns, indexed_columns)
+            if ref is not None:
+                refs[ref.key] = ref
         if progress is not None:
             progress(index, len(tables), f"inspected {table.name}")
     return refs
+
+
+def _load_row_counts(conn: Connection, tables: list[Table]) -> dict[str, int | None]:
+    """Cheap row counts per table, using catalog estimates for very large tables.
+
+    Returns ``None`` for a table whose exact COUNT(*) is unavailable (timed out).
+    """
+    row_counts: dict[str, int | None] = {}
+    for table in tables:
+        estimate = estimate_row_count(conn, table)
+        if estimate is not None and estimate >= LARGE_TABLE_THRESHOLD:
+            row_counts[table.name] = estimate
+            continue
+        try:
+            row_counts[table.name] = int(
+                query_timeout.execute(conn, select(func.count()).select_from(table)).scalar_one()
+            )
+        except query_timeout.QueryTimeout:
+            row_counts[table.name] = None
+    return row_counts
+
+
+def _build_column_ref(
+    conn: Connection,
+    table: Table,
+    column: Any,
+    total_rows: int | None,
+    type_group: str,
+    unique_columns: set[str],
+    indexed_columns: set[str],
+) -> ColumnRef | None:
+    """Build a ColumnRef for a column, applying row-count gates and skipping on timeout.
+
+    Gates mirror the profiler: COUNT(column) only when total_rows <= 5M (or indexed),
+    COUNT(DISTINCT column) only when total_rows <= 100K (or <= 1M and indexed).
+    """
+    if total_rows is None:
+        return None
+    indexed = column.name in indexed_columns
+    if not (total_rows <= 5_000_000 or indexed):
+        return None
+    try:
+        non_nulls = int(
+            query_timeout.execute(conn, select(func.count(column)).select_from(table)).scalar_one()
+        )
+    except query_timeout.QueryTimeout:
+        return None
+    if non_nulls == 0:
+        return None
+    if not (total_rows <= 100_000 or (total_rows <= 1_000_000 and indexed)):
+        return None
+    try:
+        distinct_count = int(
+            query_timeout.execute(
+                conn, select(func.count(func.distinct(column))).select_from(table)
+            ).scalar_one()
+        )
+    except query_timeout.QueryTimeout:
+        return None
+    return ColumnRef(
+        table=table.name,
+        column=column.name,
+        type_group=type_group,
+        is_primary_or_unique=column.name in unique_columns,
+        is_id_like=is_id_like(column.name),
+        total_rows=total_rows,
+        non_nulls=non_nulls,
+        distinct_count=distinct_count,
+    )
 
 
 def infer_links(
@@ -303,11 +373,16 @@ def load_distinct_sets(
             continue
         table = table_by_name[ref.table]
         column = table.c[ref.column]
-        values = {
-            normalize_value(row[0])
-            for row in conn.execute(select(column).where(column.is_not(None)).distinct())
-            if normalize_value(row[0]) is not None
-        }
+        try:
+            values = {
+                normalize_value(row[0])
+                for row in query_timeout.execute(
+                    conn, select(column).where(column.is_not(None)).distinct()
+                )
+                if normalize_value(row[0]) is not None
+            }
+        except query_timeout.QueryTimeout:
+            values = set()
         if values:
             distinct_sets[key] = values
         if progress is not None:
@@ -446,8 +521,11 @@ def spot_check_overlap(
     right: ColumnRef,
     limit: int = 50,
 ) -> bool:
-    left_values = load_limited_distinct_values(conn, table_by_name[left.table], left.column, limit)
-    right_values = load_limited_distinct_values(conn, table_by_name[right.table], right.column, limit)
+    try:
+        left_values = load_limited_distinct_values(conn, table_by_name[left.table], left.column, limit)
+        right_values = load_limited_distinct_values(conn, table_by_name[right.table], right.column, limit)
+    except query_timeout.QueryTimeout:
+        return True
     if not left_values or not right_values:
         return False
     return bool(left_values & right_values)
@@ -456,7 +534,9 @@ def spot_check_overlap(
 def load_limited_distinct_values(conn: Connection, table: Table, column_name: str, limit: int) -> set[Any]:
     column = table.c[column_name]
     values = set()
-    for row in conn.execute(select(column).where(column.is_not(None)).distinct().limit(limit)):
+    for row in query_timeout.execute(
+        conn, select(column).where(column.is_not(None)).distinct().limit(limit)
+    ):
         value = normalize_value(row[0])
         if value is not None:
             values.add(value)
@@ -597,6 +677,16 @@ def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument("--exclude-tables", help="Comma-separated table denylist.")
     parser.add_argument("--containment-threshold", type=float, default=0.8, help="Minimum exact containment for inferred links.")
     parser.add_argument("--max-distinct-values", type=int, default=10_000, help="Maximum distinct values to load per candidate column.")
+    parser.add_argument(
+        "--query-timeout",
+        type=int,
+        default=DEFAULT_QUERY_TIMEOUT,
+        help=(
+            "Abort any linking query that runs longer than this many seconds, skip the affected "
+            "column/metric, and continue. 0 disables. Applies to PostgreSQL/MySQL/MariaDB "
+            f"(SQLite/DuckDB have no native support). Default {DEFAULT_QUERY_TIMEOUT}."
+        ),
+    )
     return parser
 
 
@@ -607,6 +697,8 @@ def default_output_path(database: str) -> Path:
 def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     parser = build_arg_parser(prog=prog)
     args = parser.parse_args(argv)
+    if args.query_timeout < 0:
+        parser.error("--query-timeout must be a non-negative integer")
     url = resolve_database_url(args, parser)
 
     options = SchemaLinkOptions(
@@ -614,6 +706,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         exclude_tables=parse_table_set(args.exclude_tables) or frozenset(),
         containment_threshold=args.containment_threshold,
         max_distinct_values=args.max_distinct_values,
+        query_timeout=args.query_timeout,
         schema=resolve_schema(args),
     )
     engine = create_engine(url)

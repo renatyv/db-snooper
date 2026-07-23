@@ -7,6 +7,7 @@ Generate a single `db_/schema.sql` profile per schema by default. When requested
 For each table:
 1. Generate `CREATE TABLE` DDL with all indexes and constraints.
 2. Generate a data profile.
+   - Use query timouts to prevent hanging queries. If a query runs for 10s or more -> abort the query and skip this metric
    - Use internal database stats to estimate number of rows. If its hundreds of millions or more -> use the internal stats to generate profile, don't run any queries
    - If a table has fewer than 50 rows, include rows up to a small deterministic cap. Never dump values for sensitive fields. Treat column names containing `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token` as sensitive, and redact sampled rows and value profiles.
    - If a table has more than 50 rows, include the number of rows, three latest rows, and five random rows. Also generate per-column profiles:
