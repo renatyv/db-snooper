@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import re
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time
@@ -20,6 +22,7 @@ from sqlalchemy.sql.sqltypes import BigInteger, Date, DateTime, Float, Integer, 
 from db_snooper import __version__
 from db_snooper import query_timeout
 from db_snooper.connection import add_connection_arguments, list_schemas, resolve_database_url, resolve_schema
+from db_snooper.permissions import check_permissions, format_warnings
 from db_snooper.profiler import (
     LARGE_TABLE_THRESHOLD,
     default_output_path as default_profile_output_path,
@@ -31,6 +34,8 @@ from db_snooper.profiler import (
 )
 from db_snooper.progress import ProgressBar
 from db_snooper.query_timeout import DEFAULT_QUERY_TIMEOUT
+
+_logger = logging.getLogger("db_snooper")
 
 
 @dataclass(frozen=True)
@@ -111,6 +116,21 @@ def link_schema(engine: Engine, options: SchemaLinkOptions, progress: SchemaLink
 
     with engine.connect() as conn:
         query_timeout.apply_query_timeout(conn, options.query_timeout)
+        perm_report = check_permissions(conn, engine.dialect.name, options.schema, table_names)
+        for warning in format_warnings(perm_report):
+            _logger.warning(warning)
+        accessible = set(perm_report.accessible_tables)
+        table_names = [name for name in table_names if name in accessible]
+        if not table_names:
+            _logger.warning("No accessible tables to link; skipping schema.")
+            return render_markdown(
+                engine.dialect.name,
+                database,
+                options.schema or engine.dialect.default_schema_name or "",
+                url,
+                [],
+                [],
+            )
         metadata = MetaData()
         tables = []
         for index, table_name in enumerate(table_names, start=1):
@@ -695,6 +715,7 @@ def default_output_path(database: str) -> Path:
 
 
 def main(argv: list[str] | None = None, prog: str | None = None) -> int:
+    logging.basicConfig(level=logging.WARNING, format="%(message)s", stream=sys.stderr)
     parser = build_arg_parser(prog=prog)
     args = parser.parse_args(argv)
     if args.query_timeout < 0:

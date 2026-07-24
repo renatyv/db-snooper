@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import os
 import re
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timezone
@@ -21,8 +23,11 @@ from sqlalchemy.sql.sqltypes import BigInteger, Float, Integer, Numeric, SmallIn
 from db_snooper import __version__
 from db_snooper import query_timeout
 from db_snooper.connection import add_connection_arguments, list_schemas, resolve_database_url, resolve_schema
+from db_snooper.permissions import PermissionReport, check_permissions, format_warnings
 from db_snooper.progress import ProgressBar
 from db_snooper.query_timeout import DEFAULT_QUERY_TIMEOUT
+
+_logger = logging.getLogger("db_snooper")
 
 SENSITIVE_NAME_PARTS = ("password", "passwd", "pwd", "hash", "salt", "secret", "token")
 
@@ -60,6 +65,7 @@ def profile_database(
     options: ProfileOptions,
     progress: ProfileProgress | None = None,
     table_names: list[str] | None = None,
+    permission_report: PermissionReport | None = None,
 ) -> str:
     tables = table_names if table_names is not None else list_schema_tables(engine, options)
 
@@ -77,6 +83,15 @@ def profile_database(
 
     with engine.connect() as conn:
         query_timeout.apply_query_timeout(conn, options.query_timeout)
+        if permission_report is None:
+            permission_report = check_permissions(conn, engine.dialect.name, options.schema, tables)
+            for warning in format_warnings(permission_report):
+                _logger.warning(warning)
+        accessible = set(permission_report.accessible_tables)
+        tables = [table for table in tables if table in accessible]
+        if not tables:
+            _logger.warning("No accessible tables to profile; skipping schema.")
+            return "\n".join(lines).rstrip() + "\n"
         metadata = MetaData()
         for index, table_name in enumerate(tables, start=1):
             if progress is not None:
@@ -718,6 +733,7 @@ def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None, prog: str | None = None) -> int:
+    logging.basicConfig(level=logging.WARNING, format="%(message)s", stream=sys.stderr)
     parser = build_arg_parser(prog=prog)
     args = parser.parse_args(argv)
     if args.large_table_threshold < 1:
@@ -758,9 +774,23 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
             schema_dir = output_dir / output_component(schema)
             if args.per_table:
                 schema_dir.mkdir(parents=True, exist_ok=True)
+                with engine.connect() as conn:
+                    perm_report = check_permissions(conn, engine.dialect.name, schema_options.schema, tables)
+                for warning in format_warnings(perm_report):
+                    _logger.warning(warning)
+                accessible_tables = set(perm_report.accessible_tables)
                 for table_name in tables:
-                    table_output = profile_database(engine, schema_options, progress=show_progress, table_names=[table_name])
-                    (schema_dir / f"{output_component(table_name)}.sql").write_text(table_output, encoding="utf-8")
+                    if table_name not in accessible_tables:
+                        continue
+                    table_output = profile_database(
+                        engine,
+                        schema_options,
+                        progress=show_progress,
+                        table_names=[table_name],
+                        permission_report=perm_report,
+                    )
+                    if table_output.strip():
+                        (schema_dir / f"{output_component(table_name)}.sql").write_text(table_output, encoding="utf-8")
             else:
                 output = profile_database(engine, schema_options, progress=show_progress, table_names=tables)
                 output_dir.mkdir(parents=True, exist_ok=True)
