@@ -8,6 +8,8 @@ compatibility: opencode, OpenWork, PI, Claude, ChatGPT, custom agent runners
 
 Use this skill to generate compact, LLM-ready database context before writing or reviewing SQL. It runs `db-snooper profile` to produce a `.sql` schema and data profile, then runs `db-snooper links` to produce a Markdown report of declared and inferred schema links.
 
+For single-purpose tasks, use the focused sibling skills: `db-snooper-profile` (schema/data profiling only) or `db-snooper-schema-links` (join-path discovery only). This umbrella skill runs both in one pass.
+
 ## When To Use
 
 - Use when the user asks for database profiling, schema links, table summaries, join candidates, text-to-SQL context, or SQL generation against an existing database.
@@ -16,169 +18,37 @@ Use this skill to generate compact, LLM-ready database context before writing or
 - Do not use this as a full data export tool.
 - Do not perform destructive database operations.
 
-## Inputs To Gather
+## Connection And Options
 
-- Database type: `sqlite`, `postgres`, `mysql`, `mariadb`, or `duckdb`.
-- Database name or file path.
-- Optional server connection details: host, port, user, and password.
-- Optional table filters: `--include-tables` and `--exclude-tables`.
-- Optional schema filter: `--schema` or `DB_SNOOPER_SCHEMA`.
-- Optional output directory for the generated profile and schema links.
+db-snooper supports SQLite, PostgreSQL, MySQL, MariaDB, and DuckDB (all drivers ship with the base install; no extra is needed).
 
-Prefer environment variables or secure prompts for passwords. Do not print passwords in logs, prompts, generated files, or summaries.
-
-Supported environment variables:
-
-- `DB_SNOOPER_DB_TYPE`
-- `DB_SNOOPER_DATABASE`
-- `DB_SNOOPER_DB_HOST`
-- `DB_SNOOPER_DB_PORT`
-- `DB_SNOOPER_DB_USER`
-- `DB_SNOOPER_DB_PASSWORD`
-- `DB_SNOOPER_SCHEMA`
-
-## Workflow
-
-1. Use `db-snooper` directly if it is installed as a CLI app, or use `uv run db-snooper` from the repository checkout.
-2. For server databases, install the relevant driver extra: `postgres`, `mysql`, `mariadb`, or `duckdb`.
-3. Run the profiler first.
-4. Run schema linking second.
-5. Inspect the outputs before using or sharing them.
-6. Feed both generated files to the SQL-generation agent as required context.
-
-## CLI Recipes
-
-SQLite:
+Run db-snooper with `uvx` (no install needed). PostgreSQL example:
 
 ```bash
-db-snooper profile --db-type sqlite --database eval-dataset/superhero/superhero.sqlite
-db-snooper links --db-type sqlite --database eval-dataset/superhero/superhero.sqlite
+uvx db-snooper profile --db-type postgres --database app_db --user readonly_user --host localhost --port 5432 --ask-password
+uvx db-snooper links   --db-type postgres --database app_db --user readonly_user --host localhost --port 5432 --ask-password
 ```
 
-SQLite with an explicit output directory:
+See every flag and its default — connection details, `--schema`, table filters, thresholds, `--per-table`, `--output`, and the `DB_SNOOPER_*` environment-variable fallbacks — with:
 
 ```bash
-db-snooper profile --db-type sqlite --database eval-dataset/superhero/superhero.sqlite --output superhero_context
-db-snooper links --db-type sqlite --database eval-dataset/superhero/superhero.sqlite --output superhero_context
+uvx db-snooper -h
+uvx db-snooper profile -h
+uvx db-snooper links -h
 ```
 
-Table filters:
+Run the profiler first, then the linker. For frequent use, install once with `uv tool install db-snooper` and run `db-snooper ...` directly.
 
-```bash
-db-snooper profile --db-type sqlite --database app.sqlite --include-tables users,orders,line_items
-db-snooper links --db-type sqlite --database app.sqlite --include-tables users,orders,line_items
-```
+## Enriching Table And Column Descriptions
 
-DuckDB:
+db-snooper emits the raw schema, data profile, and join report. Turn these into concise, accurate short descriptions of each table and column by drawing on any extra context that is available:
 
-```bash
-uv tool install '.[duckdb]' --reinstall
-db-snooper profile --db-type duckdb --database warehouse.duckdb
-db-snooper links --db-type duckdb --database warehouse.duckdb
-```
+- **Source code that queries the data** (ORM models, repositories, query files): infer what each table and column means and how it is used.
+- **Table/column descriptions, data dictionaries, or an ontology**: adopt the documented names and definitions.
+- **Example or gold queries**: learn the real join paths and the columns that matter for common questions.
+- **Chat logs or natural-language questions about the data**: capture how users actually refer to tables and fields.
 
-PostgreSQL:
-
-```bash
-uv tool install '.[postgres]' --reinstall
-DB_SNOOPER_DB_TYPE=postgres \
-DB_SNOOPER_DATABASE=app_db \
-DB_SNOOPER_DB_HOST=localhost \
-DB_SNOOPER_DB_USER=readonly_user \
-db-snooper profile --ask-password
-DB_SNOOPER_DB_TYPE=postgres \
-DB_SNOOPER_DATABASE=app_db \
-DB_SNOOPER_DB_HOST=localhost \
-DB_SNOOPER_DB_USER=readonly_user \
-db-snooper links --ask-password
-```
-
-MySQL:
-
-```bash
-uv tool install '.[mysql]' --reinstall
-DB_SNOOPER_DB_TYPE=mysql \
-DB_SNOOPER_DATABASE=app_db \
-DB_SNOOPER_DB_HOST=localhost \
-DB_SNOOPER_DB_USER=readonly_user \
-db-snooper profile --ask-password
-DB_SNOOPER_DB_TYPE=mysql \
-DB_SNOOPER_DATABASE=app_db \
-DB_SNOOPER_DB_HOST=localhost \
-DB_SNOOPER_DB_USER=readonly_user \
-db-snooper links --ask-password
-```
-
-MariaDB:
-
-```bash
-uv tool install '.[mariadb]' --reinstall
-DB_SNOOPER_DB_TYPE=mariadb \
-DB_SNOOPER_DATABASE=app_db \
-DB_SNOOPER_DB_HOST=localhost \
-DB_SNOOPER_DB_USER=readonly_user \
-db-snooper profile --ask-password
-DB_SNOOPER_DB_TYPE=mariadb \
-DB_SNOOPER_DATABASE=app_db \
-DB_SNOOPER_DB_HOST=localhost \
-DB_SNOOPER_DB_USER=readonly_user \
-db-snooper links --ask-password
-```
-
-## Python API Recipes
-
-Simple use:
-
-```python
-from db_snooper import generate_profile, generate_schema_links
-
-database_url = "sqlite:///eval-dataset/superhero/superhero.sqlite"
-
-profile_sql = generate_profile(database_url)
-schema_links_md = generate_schema_links(database_url)
-```
-
-Advanced options:
-
-```python
-from sqlalchemy import create_engine
-from db_snooper import ProfileOptions, SchemaLinkOptions, link_schema, profile_database
-
-engine = create_engine("sqlite:///eval-dataset/superhero/superhero.sqlite")
-
-profile_sql = profile_database(
-    engine,
-    ProfileOptions(
-        small_table_threshold=50,
-        sample_row_limit=25,
-        include_tables=frozenset({"superhero", "publisher", "alignment"}),
-    ),
-)
-schema_links_md = link_schema(
-    engine,
-    SchemaLinkOptions(
-        containment_threshold=0.8,
-        max_distinct_values=10_000,
-    ),
-)
-```
-
-## How To Read The Outputs
-
-The profile `.sql` file contains:
-
-- Metadata header with db-snooper version, SQL dialect, database, and URL with hidden password.
-- `CREATE TABLE` DDL and indexes/constraints.
-- Total row counts.
-- Deterministic sampled rows for small tables.
-- Per-column null, non-null, distinct, numeric range, median, top-value, and shape summaries for larger tables.
-- Redacted values for sensitive column names containing `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token`.
-
-The schema links `.md` file contains:
-
-- Declared PK/FK links from database constraints.
-- Inferred links from name/type/cardinality/containment evidence.
-- Evidence labels for each inferred join candidate.
+When a profile for the same database already exists (a previously generated `<database>/<schema>.sql`), read it first and carry over its table/column descriptions and field notes, then refine them with the freshly profiled data instead of starting from scratch.
 
 Treat inferred links as candidates, not guaranteed joins. Validate them against the user question and the generated profile before writing final SQL.
 
@@ -211,20 +81,3 @@ Rules:
 - Lower `--max-distinct-values` to cap memory and database load.
 - Review generated files before sending them to external services.
 - Remember that redaction is name-based; do not assume every sensitive value is automatically removed.
-
-## Verification Checklist
-
-Use included databases for smoke verification. Do not add or run unit tests unless the user explicitly asks.
-
-```bash
-db-snooper profile --db-type sqlite --database eval-dataset/superhero/superhero.sqlite --output /tmp/superhero_context
-db-snooper links --db-type sqlite --database eval-dataset/superhero/superhero.sqlite --output /tmp/superhero_context
-```
-
-Confirm:
-
-- The profile file exists at `/tmp/superhero_context/main.sql` and starts with `-- db-snooper`.
-- The profile contains `CREATE TABLE` statements and `-- total rows=` summaries.
-- The schema-link file exists at `/tmp/superhero_context/main_schema_links.md` and starts with `# Schema Links`.
-- The schema-link file contains `## Declared PK/FK Links` and `## Inferred Links`.
-- The generated files do not contain unexpected secrets before sharing them.

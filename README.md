@@ -182,6 +182,45 @@ schema_links_md = link_schema(
 )
 ```
 
+## Agent Skills
+
+DB Snooper ships reusable [agent skills](https://opencode.ai/docs/skills/) that teach AI agents when and how to profile a database and discover join links. Three skills are bundled:
+
+| Skill | Triggers on | Command | Output |
+|---|---|---|---|
+| `db-snooper-profile` | profiling, schema/data context, table summaries, column distributions | `db-snooper profile` | `<db>/<schema>.sql` |
+| `db-snooper-schema-links` | join paths, relationships, FK discovery, schema links | `db-snooper links` | `<db>/<schema>_schema_links.md` |
+| `db-snooper-context` | both / general text-to-SQL context | profile then links | both files |
+
+List the bundled skills:
+
+```bash
+uvx db-snooper skills list
+```
+
+Install the skills into an agent's discovery directory (no repo clone needed; the `SKILL.md` files ship inside the wheel):
+
+```bash
+# Default: opencode global (~/.config/opencode/skills)
+uvx db-snooper skills install
+
+# All three common discovery locations at once (opencode + Claude + agents)
+uvx db-snooper skills install --target all
+
+# Custom or project-local directory
+uvx db-snooper skills install --dir ./.opencode/skills --force
+```
+
+Discovery directories:
+
+- `--target opencode` → `~/.config/opencode/skills` (default)
+- `--target claude` → `~/.claude/skills`
+- `--target agents` → `~/.agents/skills`
+- `--target all` → all three
+- `--dir PATH` → any custom path (overrides `--target`)
+
+For zero per-user setup, commit the installed skill folders (for example `.opencode/skills/`) into your repository. Agents that walk the working directory discover them automatically.
+
 ## License
 
 The DB Snooper source code is licensed under the MIT License. See `LICENCE`.

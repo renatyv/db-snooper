@@ -1,6 +1,6 @@
 [project]
 name = "db-snooper"
-version = "0.0.7"
+version = "0.0.8"
 description = "Generate compact, LLM-ready database context with schema profiles and inferred join links."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -24,9 +24,6 @@ classifiers = [
 authors = [
   {name = "Renat Iuldashev", email = "renatyv@gmail.com"}
 ]
-
-[project.optional-dependencies]
-mariadb = ["mariadb>=1.1"]
 
 [project.scripts]
 db-snooper = "db_snooper.cli:main"
