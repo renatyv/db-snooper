@@ -1,26 +1,38 @@
 # DB Snooper
 
-DB Snooper generates compact, LLM-ready database context for SQL generation, query debugging, and schema exploration.
+[![PyPI](https://img.shields.io/pypi/v/db-snooper.svg)](https://pypi.org/project/db-snooper/)
+[![Python](https://img.shields.io/pypi/pyversions/db-snooper.svg)](https://pypi.org/project/db-snooper/)
+
+DB Snooper generates compact, LLM-ready database context for SQL generation, query debugging, and schema exploration. Profiling alone drives state-of-the-art text-to-SQL accuracy ([Automatic Metadata Extraction for Text-to-SQL](https://arxiv.org/abs/2505.19988)). Supports SQLite, PostgreSQL, MySQL, MariaDB, and DuckDB. Requires Python ≥ 3.10.
 
 Specification: see [`spec/main.md`](spec/main.md) for the design notes behind profiling, schema linking, and the text-to-SQL pipeline.
 
-It inspects an existing database and produces two useful artifacts:
+It inspects an existing database and produces two artifacts:
 
-- A SQL profile file with DDL, row counts, sampled small tables, and per-column summaries.
-- A Markdown schema-link report with declared PK/FK relationships and inferred join candidates.
+- A SQL profile (`<database>/<schema>.sql`): DDL, row counts, sampled rows, and per-column summaries. Use `--per-table` for one `.sql` per table.
+- A schema-link report (`<database>/<schema>_schema_links.md`): declared PK/FK relationships and inferred join candidates.
 
-Outputs are organized by database. Each schema receives `<database>/<schema>.sql` by default; pass `--per-table` to write one `<database>/<schema>/<table>.sql` profile per table. Schema links are written as `<database>/<schema>_schema_links.md`.
-
-This is useful when an AI agent, coding assistant, or text-to-SQL pipeline needs reliable database context without dumping the whole database. Instead of guessing table meanings or join paths, the agent can read the generated profile and link report before writing SQL.
+AI agents and text-to-SQL pipelines can read this context instead of guessing table meanings or join paths.
 
 ## Quick Start
 
-Profile your local MySQL dababase without installing the whole library
+Install with pip:
 ```bash
- uvx db-snooper profile --db-type mysql --user user --password password --database db --schema sch --port 3306
+pip install db-snooper
 ```
 
-This creates `db/sch.sql` and `db/sch_schema_links.md`. Use `--schema` to generate artifacts for only one schema.
+Or run instantly with `uvx` (no install needed):
+```bash
+uvx db-snooper profile --db-type mysql --user user --password password --database db --schema sch --port 3306
+```
+
+This creates a profile at `db/sch.sql`. To (re)generate just the schema-link report for the same database:
+
+```bash
+db-snooper links --db-type mysql --user user --password password --database db --schema sch --port 3306
+```
+
+The schema-link report lists declared PK/FK joins and inferred join candidates with evidence labels. See [What The Outputs Contain](#what-the-outputs-contain) for details.
 
 ## What The Outputs Contain
 
