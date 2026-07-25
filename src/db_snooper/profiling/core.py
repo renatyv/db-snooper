@@ -10,17 +10,32 @@ from db_snooper import __version__, query_timeout
 from db_snooper.permissions import PermissionReport, check_permissions, format_warnings
 from db_snooper.profiling.models import ProfileOptions, ProfileProgress
 from db_snooper.profiling.tables import get_table_ddl, profile_table
+from db_snooper.shared import is_technical_table
 
 _logger = logging.getLogger("db_snooper")
 
 
-def list_schema_tables(engine: Engine, options: ProfileOptions) -> list[str]:
+def list_schema_tables(
+    engine: Engine, options: ProfileOptions
+) -> tuple[list[str], list[str]]:
+    """Return ``(tables, skipped_technical)`` for the schema.
+
+    Migration/DB-internal tables are excluded by default unless
+    ``options.include_technical_tables`` is set; the excluded names are returned
+    so the profile can record which tables were skipped.
+    """
     inspector = inspect(engine)
-    tables = sorted(inspector.get_table_names(schema=options.schema))
+    all_tables = sorted(inspector.get_table_names(schema=options.schema))
+    if not options.include_technical_tables:
+        skipped_technical = [t for t in all_tables if is_technical_table(t)]
+        tables = [t for t in all_tables if not is_technical_table(t)]
+    else:
+        skipped_technical = []
+        tables = list(all_tables)
     if options.include_tables is not None:
         tables = [table for table in tables if table in options.include_tables]
     tables = [table for table in tables if table not in options.exclude_tables]
-    return tables
+    return tables, skipped_technical
 
 
 def profile_database(
@@ -28,10 +43,10 @@ def profile_database(
     options: ProfileOptions,
     progress: ProfileProgress | None = None,
     table_names: list[str] | None = None,
+    skipped_technical_tables: list[str] | None = None,
     permission_report: PermissionReport | None = None,
 ) -> str:
-    tables = table_names if table_names is not None else list_schema_tables(engine, options)
-
+    tables = table_names if table_names is not None else []
     database = engine.url.database or ""
     generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     lines = [
@@ -41,8 +56,17 @@ def profile_database(
         f"-- dialect: {engine.dialect.name}",
         f"-- database: {database}",
         f"-- schema: {options.schema or engine.dialect.default_schema_name or ''}",
-        "",
     ]
+    if table_names is None:
+        tables, computed_skipped = list_schema_tables(engine, options)
+        if skipped_technical_tables is None:
+            skipped_technical_tables = computed_skipped
+    if skipped_technical_tables:
+        lines.append(
+            "-- skipped technical tables: "
+            + ", ".join(sorted(skipped_technical_tables))
+        )
+    lines.append("")
 
     with engine.connect() as conn:
         query_timeout.apply_query_timeout(conn, options.query_timeout)

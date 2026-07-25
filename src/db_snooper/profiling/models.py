@@ -16,6 +16,7 @@ class ProfileOptions:
     include_tables: frozenset[str] | None = None
     exclude_tables: frozenset[str] = frozenset()
     schema: str | None = None
+    include_technical_tables: bool = False
 
 
 ProfileProgress = Callable[[int, int, str], None]

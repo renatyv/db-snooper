@@ -36,6 +36,14 @@ def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
         "--exclude-tables", help="Comma-separated table denylist."
     )
     parser.add_argument(
+        "--include-technical-tables",
+        action="store_true",
+        help=(
+            "Link migration/framework tables (e.g. schema_migrations, "
+            "alembic_version, flyway_schema_history) that are skipped by default."
+        ),
+    )
+    parser.add_argument(
         "--containment-threshold",
         type=float,
         default=0.8,
@@ -75,6 +83,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         max_distinct_values=args.max_distinct_values,
         query_timeout=args.query_timeout,
         schema=resolve_schema(args),
+        include_technical_tables=args.include_technical_tables,
     )
     engine = create_engine(url)
     progress_bar = ProgressBar("Linking", 0)

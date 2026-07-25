@@ -10,6 +10,7 @@ from sqlalchemy.schema import CreateIndex, CreateTable
 from db_snooper import query_timeout
 from db_snooper.database_stats import estimate_row_count, get_indexed_column_names
 from db_snooper.profiling.columns import (
+    JSON_MAX_VALUE_BYTES,
     get_unique_column_names,
     json_dumps,
     jsonable,
@@ -94,27 +95,24 @@ def profile_table(
             "ALL_ROWS" if total_rows <= options.sample_row_limit else "SAMPLED_ROWS"
         )
         lines.append(f"-- {marker}: {table.name}")
-        try:
+        sampled: list[dict[str, Any]] = []
+        with query_timeout.metric(conn, [], "sampled rows"):
             sampled = sample_rows(conn, table, options.sample_row_limit)
-        except query_timeout.QueryTimeout:
-            sampled = []
         for row in sampled:
             lines.append(f"-- row: {json_dumps(row)}")
         return lines
 
     lines.append(f"-- LATEST_ROWS: {table.name}")
-    try:
+    latest: list[dict[str, Any]] = []
+    with query_timeout.metric(conn, [], "latest rows"):
         latest = latest_rows(conn, table, 3)
-    except query_timeout.QueryTimeout:
-        latest = []
     for row in latest:
         lines.append(f"-- row: {json_dumps(row)}")
 
     lines.append(f"-- RANDOM_ROWS: {table.name}")
-    try:
+    random_sample: list[dict[str, Any]] = []
+    with query_timeout.metric(conn, [], "random rows"):
         random_sample = random_rows(conn, table, 5)
-    except query_timeout.QueryTimeout:
-        random_sample = []
     for row in random_sample:
         lines.append(f"-- row: {json_dumps(row)}")
 
@@ -175,11 +173,26 @@ def rows_for_statement(
         output: dict[str, Any] = {}
         for column in table.columns:
             value = row[column.name]
-            output[column.name] = (
-                "[REDACTED]" if is_sensitive(column.name) else jsonable(value)
-            )
+            if is_sensitive(column.name):
+                output[column.name] = "[REDACTED]"
+            else:
+                output[column.name] = bounded_value(value)
         rows.append(output)
     return rows
+
+
+def bounded_value(value: Any) -> Any:
+    """JSON-encode and cap oversized container values so sampled-row output
+    cannot be dominated by a single huge JSON/ARRAY value."""
+    encoded = jsonable(value)
+    if isinstance(encoded, (dict, list)):
+        try:
+            serialized = json_dumps(encoded)
+        except (TypeError, ValueError):
+            return encoded
+        if len(serialized) > JSON_MAX_VALUE_BYTES:
+            return f"[LARGE_JSON:{len(serialized)}]"
+    return encoded
 
 
 def ensure_semicolon(sql: str) -> str:

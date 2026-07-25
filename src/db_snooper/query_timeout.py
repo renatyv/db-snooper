@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import logging
+from contextlib import contextmanager
+
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 DEFAULT_QUERY_TIMEOUT = 10
+
+_logger = logging.getLogger("db_snooper")
 
 _TIMEOUT_DIALECTS = {"postgresql", "mysql"}
 
@@ -99,3 +104,40 @@ def execute(conn: Connection, statement: object):
         conn.rollback()
         _set_session_timeout(conn, conn.info.get("query_timeout_seconds", 0))
         raise QueryTimeout(f"query exceeded timeout: {exc.orig!r}") from exc
+
+
+def recover_connection(conn: Connection) -> None:
+    """Roll back the active transaction and restore the cached statement timeout.
+
+    PostgreSQL aborts the whole transaction after any error ("current transaction
+    is aborted, commands ignored until end of transaction block"); recovering
+    from a non-timeout metric error requires an explicit rollback before the next
+    query can run.
+    """
+    try:
+        conn.rollback()
+    except SQLAlchemyError:
+        pass
+    _set_session_timeout(conn, conn.info.get("query_timeout_seconds", 0))
+
+
+@contextmanager
+def metric(conn: Connection, skipped: list[str], metric_name: str):
+    """Run a single profiling metric, skipping it on any error.
+
+    A server-side timeout is recorded in ``skipped`` (the timeout itself is
+    recovered inside :func:`execute`). Any other exception (type error,
+    unsupported aggregation such as ``COUNT(DISTINCT jsonb_col)``, permission
+    quirk, ...) also rolls back the transaction, restores the statement timeout,
+    records the skip, and lets profiling continue.
+    """
+    try:
+        yield
+    except QueryTimeout:
+        skipped.append(metric_name)
+    except Exception as exc:
+        recover_connection(conn)
+        skipped.append(metric_name)
+        _logger.debug(
+            "profiling metric %r skipped: %r", metric_name, exc, exc_info=True
+        )

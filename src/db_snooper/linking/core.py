@@ -14,6 +14,7 @@ from db_snooper.linking.metadata import (
 from db_snooper.linking.models import SchemaLinkOptions, SchemaLinkProgress
 from db_snooper.linking.rendering import render_markdown
 from db_snooper.permissions import check_permissions, format_warnings
+from db_snooper.shared import is_technical_table
 
 _logger = logging.getLogger("db_snooper")
 
@@ -25,6 +26,10 @@ def link_schema(
 ) -> str:
     inspector = inspect(engine)
     table_names = sorted(inspector.get_table_names(schema=options.schema))
+    if not options.include_technical_tables:
+        table_names = [
+            table for table in table_names if not is_technical_table(table)
+        ]
     if options.include_tables is not None:
         table_names = [
             table for table in table_names if table in options.include_tables

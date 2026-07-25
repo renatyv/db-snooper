@@ -44,7 +44,9 @@ The profile `.sql` file contains:
 - Deterministic sampled rows for small tables.
 - Latest and random sampled rows for larger tables.
 - Per-column null, non-null, distinct, numeric range, median, top-value, and shape summaries for larger tables.
+- Top-level key frequencies for JSON/JSONB columns and min/avg/max element counts for ARRAY columns (when row counts allow).
 - Redacted values for sensitive column names containing `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token`.
+- A `-- skipped technical tables:` line naming migration/framework tables excluded from the profile.
 
 The schema links `.md` file contains:
 
@@ -142,12 +144,14 @@ Profile options:
 - `--sample-row-limit 50`: maximum sampled rows for small tables.
 - `--include-tables table_a,table_b`: only profile selected tables.
 - `--exclude-tables table_c`: skip selected tables.
+- `--include-technical-tables`: profile migration/framework tables (e.g. `schema_migrations`, `alembic_version`, `flyway_schema_history`, `django_migrations`) that are skipped by default.
 - `--per-table`: generate one `.sql` profile for each table instead of a single schema profile.
 
 Schema-link options:
 
 - `--include-tables table_a,table_b`: only inspect selected tables.
 - `--exclude-tables table_c`: skip selected tables.
+- `--include-technical-tables`: link migration/framework tables that are skipped by default.
 - `--containment-threshold 0.8`: minimum exact containment for inferred links.
 - `--max-distinct-values 10000`: maximum distinct values loaded per candidate column.
 

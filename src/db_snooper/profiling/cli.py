@@ -75,6 +75,14 @@ def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument(
         "--exclude-tables", help="Comma-separated table denylist."
     )
+    parser.add_argument(
+        "--include-technical-tables",
+        action="store_true",
+        help=(
+            "Profile migration/framework tables (e.g. schema_migrations, "
+            "alembic_version, flyway_schema_history) that are skipped by default."
+        ),
+    )
     return parser
 
 
@@ -96,6 +104,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         include_tables=parse_table_set(args.include_tables),
         exclude_tables=parse_table_set(args.exclude_tables) or frozenset(),
         schema=resolve_schema(args),
+        include_technical_tables=args.include_technical_tables,
     )
     engine = create_engine(url)
     progress_bar = ProgressBar("Profiling", 0)
@@ -125,7 +134,13 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         for schema in schemas:
             active_schema = schema
             schema_options = replace(options, schema=schema)
-            tables = list_schema_tables(engine, schema_options)
+            tables, skipped_technical = list_schema_tables(engine, schema_options)
+            if skipped_technical:
+                _logger.warning(
+                    "Skipped technical tables in %s: %s",
+                    schema,
+                    ", ".join(sorted(skipped_technical)),
+                )
             schema_dir = output_dir / output_component(schema)
             if args.per_table:
                 schema_dir.mkdir(parents=True, exist_ok=True)
@@ -159,6 +174,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
                     schema_options,
                     progress=show_progress,
                     table_names=tables,
+                    skipped_technical_tables=skipped_technical,
                 )
                 output_dir.mkdir(parents=True, exist_ok=True)
                 (

@@ -130,6 +130,9 @@ def _load_row_counts(
             )
         except query_timeout.QueryTimeout:
             row_counts[table.name] = None
+        except Exception:
+            query_timeout.recover_connection(conn)
+            row_counts[table.name] = None
     return row_counts
 
 
@@ -160,6 +163,9 @@ def _build_column_ref(
         )
     except query_timeout.QueryTimeout:
         return None
+    except Exception:
+        query_timeout.recover_connection(conn)
+        return None
     if non_nulls == 0:
         return None
     if not (total_rows <= 100_000 or (total_rows <= 1_000_000 and indexed)):
@@ -171,6 +177,9 @@ def _build_column_ref(
             ).scalar_one()
         )
     except query_timeout.QueryTimeout:
+        return None
+    except Exception:
+        query_timeout.recover_connection(conn)
         return None
     return ColumnRef(
         table=table.name,

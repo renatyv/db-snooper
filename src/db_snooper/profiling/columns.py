@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import re
 from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Table, func, literal_column, select, text
+from sqlalchemy import ARRAY, Table, func, literal_column, select, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.schema import UniqueConstraint
 from sqlalchemy.sql.sqltypes import (
+    JSON,
+    LargeBinary,
     BigInteger,
     Float,
     Integer,
@@ -23,6 +26,14 @@ from sqlalchemy.sql.sqltypes import (
 
 from db_snooper import query_timeout
 from db_snooper.shared import is_sensitive
+
+_logger = logging.getLogger("db_snooper")
+
+# JSON/JSONB profiling gates: keep key extraction bounded so a single oversized
+# value or a very large table cannot hang the profile.
+JSON_PROFILE_ROW_LIMIT = 100_000   # don't attempt JSON key extraction above this
+JSON_SAMPLE_LIMIT = 1_000          # max JSON values read for key extraction
+JSON_MAX_VALUE_BYTES = 65_536      # skip individual JSON values larger than 64KB
 
 
 def profile_column(
@@ -40,15 +51,12 @@ def profile_column(
     nulls: int | None = None
     skipped: list[str] = []
     if counts_available:
-        try:
+        with query_timeout.metric(conn, skipped, "null/non-null counts"):
             non_nulls = int(
                 query_timeout.execute(
                     conn, select(func.count(column)).select_from(table)
                 ).scalar_one()
             )
-        except query_timeout.QueryTimeout:
-            non_nulls = None
-            skipped.append("null/non-null counts")
         if non_nulls is not None:
             nulls = total_rows - non_nulls
             if non_nulls == 0:
@@ -58,20 +66,18 @@ def profile_column(
                 )
                 return lines
 
-    distinct_available = total_rows <= 100_000 or (
-        total_rows <= 1_000_000 and indexed
+    distinct_supported = is_distinct_supported(column)
+    distinct_available = distinct_supported and (
+        total_rows <= 100_000 or (total_rows <= 1_000_000 and indexed)
     )
     distinct_count: int | None = None
     if distinct_available:
-        try:
+        with query_timeout.metric(conn, skipped, "distinct count"):
             distinct_count = int(
                 query_timeout.execute(
                     conn, select(func.count(func.distinct(column))).select_from(table)
                 ).scalar_one()
             )
-        except query_timeout.QueryTimeout:
-            distinct_count = None
-            skipped.append("distinct count")
 
     unique_identifier = column.name in unique_columns or (
         distinct_count is not None
@@ -89,6 +95,8 @@ def profile_column(
         summary.extend((f"nulls={nulls}", f"non_nulls={non_nulls}"))
     if distinct_count is not None:
         summary.append(f"distinct={distinct_count}")
+    if not distinct_supported and not sensitive:
+        summary.append("type=unprofiled")
     lines = [
         f"-- {column.name}: {', '.join(summary) if summary else 'profile metrics skipped'}"
     ]
@@ -96,7 +104,7 @@ def profile_column(
     if is_numeric(column):
         numeric = []
         if total_rows <= 5_000_000 or indexed:
-            try:
+            with query_timeout.metric(conn, skipped, "min/max"):
                 min_value, max_value = query_timeout.execute(
                     conn, select(func.min(column), func.max(column)).select_from(table)
                 ).one()
@@ -106,46 +114,36 @@ def profile_column(
                         f"max={format_value(max_value)}",
                     )
                 )
-            except query_timeout.QueryTimeout:
-                skipped.append("min/max")
         if total_rows <= 1_000_000 or (
             total_rows <= 10_000_000 and indexed
         ):
-            try:
+            with query_timeout.metric(conn, skipped, "average"):
                 average = query_timeout.execute(
                     conn, select(func.avg(column)).select_from(table)
                 ).scalar_one()
                 numeric.append(f"average={format_value(average)}")
-            except query_timeout.QueryTimeout:
-                skipped.append("average")
         if total_rows < 100_000:
-            try:
+            with query_timeout.metric(conn, skipped, "median"):
                 median = median_value(conn, table, column)
                 numeric.append(f"median={format_value(median)}")
-            except query_timeout.QueryTimeout:
-                skipped.append("median")
         if numeric:
             lines.append(f"-- {column.name} numeric: {', '.join(numeric)}")
 
-    if not sensitive and not unique_identifier:
+    if not sensitive and not unique_identifier and distinct_supported:
         top_values: list[tuple[Any, int]] = []
         if distinct_count is not None and distinct_count < 20:
-            try:
+            with query_timeout.metric(conn, skipped, "value counts"):
                 top_values = get_value_counts(conn, table, column, limit=None)
                 lines.append(
                     f"-- {column.name} values: {format_value_counts(top_values)}"
                 )
-            except query_timeout.QueryTimeout:
-                skipped.append("value counts")
         elif total_rows <= 100_000 and indexed:
-            try:
+            with query_timeout.metric(conn, skipped, "top values"):
                 top_values = get_value_counts(conn, table, column, limit=10)
                 if top_values and top_values[0][1] > 1:
                     lines.append(
                         f"-- {column.name} top_values: {format_value_counts(top_values)}"
                     )
-            except query_timeout.QueryTimeout:
-                skipped.append("top values")
         elif total_rows > 100_000 and indexed:
             top_values = get_catalog_top_values(conn, table, column, total_rows)
             if top_values:
@@ -156,6 +154,18 @@ def profile_column(
         shape_summary = get_shape_summary(column, distinct_count, top_values)
         if shape_summary:
             lines.append(f"-- {column.name} shape: {shape_summary}")
+
+    # Type-specific profiling for container/LOB types that cannot be DISTINCTed.
+    if not sensitive and not unique_identifier:
+        if is_json(column):
+            json_line = profile_json_column(conn, table, column, total_rows)
+            if json_line:
+                lines.append(json_line)
+        elif is_array(column):
+            array_line = profile_array_column(conn, table, column, total_rows, indexed)
+            if array_line:
+                lines.append(array_line)
+
     lines.extend(_skipped_metric_lines(column.name, skipped, timeout_seconds))
     return lines
 
@@ -369,6 +379,135 @@ def is_numeric(column: Any) -> bool:
     return isinstance(
         column.type, (Integer, BigInteger, SmallInteger, Numeric, Float)
     )
+
+
+def is_json(column: Any) -> bool:
+    # Covers base JSON, MySQL JSON, and PostgreSQL JSON/JSONB.
+    return isinstance(column.type, JSON)
+
+
+def is_array(column: Any) -> bool:
+    return isinstance(column.type, ARRAY)
+
+
+def is_lob(column: Any) -> bool:
+    return isinstance(column.type, LargeBinary)
+
+
+def is_distinct_supported(column: Any) -> bool:
+    # JSON/JSONB, ARRAY, and binary LOBs cannot be meaningfully DISTINCTed
+    # (most dialects reject it outright, and even where allowed it is too slow
+    # to be informative).
+    return not (is_json(column) or is_array(column) or is_lob(column))
+
+
+def profile_json_column(
+    conn: Connection, table: Table, column: Any, total_rows: int
+) -> str | None:
+    """Emit top-level JSON key frequencies, bounded by row-count and size gates."""
+    if total_rows > JSON_PROFILE_ROW_LIMIT:
+        return None
+    key_counts: dict[str, int] = {}
+    sampled = 0
+    try:
+        rows = query_timeout.execute(
+            conn,
+            select(column)
+            .select_from(table)
+            .where(column.is_not(None))
+            .limit(JSON_SAMPLE_LIMIT),
+        )
+        for (value,) in rows:
+            sampled += 1
+            if value is None:
+                continue
+            if not _json_value_in_bounds(value):
+                continue
+            for key in _json_keys(value):
+                key_counts[key] = key_counts.get(key, 0) + 1
+    except query_timeout.QueryTimeout:
+        return None
+    except Exception as exc:
+        query_timeout.recover_connection(conn)
+        _logger.debug(
+            "JSON key profile for %s.%s skipped: %r",
+            table.name,
+            column.name,
+            exc,
+            exc_info=True,
+        )
+        return None
+    if not key_counts or sampled == 0:
+        return None
+    ordered = sorted(key_counts.items(), key=lambda item: (-item[1], item[0]))
+    pairs = ", ".join(f"{key}={count}" for key, count in ordered)
+    return f"-- {column.name} json_keys: {pairs}"
+
+
+def profile_array_column(
+    conn: Connection, table: Table, column: Any, total_rows: int, indexed: bool
+) -> str | None:
+    """Emit min/avg/max element counts for an ARRAY column."""
+    if not (total_rows <= 5_000_000 or indexed):
+        return None
+    length_expr = _array_length_expr(conn, column)
+    if length_expr is None:
+        return None
+    try:
+        min_len, avg_len, max_len = query_timeout.execute(
+            conn,
+            select(
+                func.min(length_expr),
+                func.avg(length_expr),
+                func.max(length_expr),
+            ).select_from(table),
+        ).one()
+    except query_timeout.QueryTimeout:
+        return None
+    except Exception as exc:
+        query_timeout.recover_connection(conn)
+        _logger.debug(
+            "array length profile for %s.%s skipped: %r",
+            table.name,
+            column.name,
+            exc,
+            exc_info=True,
+        )
+        return None
+    if min_len is None and avg_len is None and max_len is None:
+        return None
+    parts = []
+    if min_len is not None:
+        parts.append(f"min_len={format_value(min_len)}")
+    if avg_len is not None:
+        parts.append(f"avg_len={format_value(avg_len)}")
+    if max_len is not None:
+        parts.append(f"max_len={format_value(max_len)}")
+    return f"-- {column.name} array: {', '.join(parts)}" if parts else None
+
+
+def _json_value_in_bounds(value: Any) -> bool:
+    try:
+        return len(json_dumps(value)) <= JSON_MAX_VALUE_BYTES
+    except (TypeError, ValueError):
+        return False
+
+
+def _json_keys(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        return [str(key) for key in value.keys()]
+    return []
+
+
+def _array_length_expr(conn: Connection, column: Any):
+    dialect = conn.dialect.name
+    if dialect == "postgresql":
+        # cardinality() handles multi-dim and empty arrays for 1-D inputs.
+        return func.cardinality(column)
+    if dialect == "duckdb":
+        return func.len(column)
+    # Fallback: array_length(col, 1) works on PostgreSQL-compatible dialects.
+    return func.array_length(column, 1)
 
 
 def is_identifier_name(column_name: str) -> bool:
