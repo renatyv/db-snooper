@@ -1,0 +1,21 @@
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+
+from db_snooper.database_stats import LARGE_TABLE_THRESHOLD
+from db_snooper.query_timeout import DEFAULT_QUERY_TIMEOUT
+
+
+@dataclass(frozen=True)
+class ProfileOptions:
+    small_table_threshold: int = 50
+    sample_row_limit: int = 50
+    large_table_threshold: int = LARGE_TABLE_THRESHOLD
+    query_timeout: int = DEFAULT_QUERY_TIMEOUT
+    include_tables: frozenset[str] | None = None
+    exclude_tables: frozenset[str] = frozenset()
+    schema: str | None = None
+
+
+ProfileProgress = Callable[[int, int, str], None]

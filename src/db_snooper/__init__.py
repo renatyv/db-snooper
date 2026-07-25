@@ -7,9 +7,9 @@ except PackageNotFoundError:
     __version__ = "0.0.1"
 
 from db_snooper.api import generate_profile, generate_schema_links
+from db_snooper.linking import SchemaLinkOptions, link_schema
 from db_snooper.permissions import PermissionReport, check_permissions
-from db_snooper.profiler import ProfileOptions, profile_database
-from db_snooper.schema_linker import SchemaLinkOptions, link_schema
+from db_snooper.profiling import ProfileOptions, profile_database
 
 __all__ = [
     "PermissionReport",

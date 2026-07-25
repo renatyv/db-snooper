@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import argparse
 
-from db_snooper import profiler, schema_linker
+from db_snooper.linking import cli as linking_cli
+from db_snooper.profiling import cli as profiling_cli
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -20,9 +21,9 @@ def main(argv: list[str] | None = None) -> int:
 
         argv = sys.argv[1:]
     if argv and argv[0] == "profile":
-        return profiler.main(argv[1:], prog="db-snooper profile")
+        return profiling_cli.main(argv[1:], prog="db-snooper profile")
     if argv and argv[0] == "links":
-        return schema_linker.main(argv[1:], prog="db-snooper links")
+        return linking_cli.main(argv[1:], prog="db-snooper links")
     if argv and argv[0] == "skills":
         from db_snooper import agent_skills
 

@@ -5,8 +5,8 @@ from collections.abc import Callable
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine, URL
 
-from db_snooper.profiler import ProfileOptions, ProfileProgress, profile_database
-from db_snooper.schema_linker import SchemaLinkOptions, SchemaLinkProgress, link_schema
+from db_snooper.linking import SchemaLinkOptions, SchemaLinkProgress, link_schema
+from db_snooper.profiling import ProfileOptions, ProfileProgress, profile_database
 
 DatabaseInput = Engine | URL | str
 
