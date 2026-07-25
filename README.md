@@ -5,7 +5,7 @@
 
 DB Snooper generates compact, LLM-ready database context for SQL generation, query debugging, and schema exploration. Profiling alone drives state-of-the-art text-to-SQL accuracy ([Automatic Metadata Extraction for Text-to-SQL](https://arxiv.org/abs/2505.19988)). Supports SQLite, PostgreSQL, MySQL, MariaDB, and DuckDB. Requires Python ≥ 3.10.
 
-Specification: see [`spec/main.md`](spec/main.md) for the design notes behind profiling, schema linking, and the text-to-SQL pipeline.
+**Specification: [`spec/main.md`](spec/main.md)**
 
 It inspects an existing database and produces two artifacts:
 
