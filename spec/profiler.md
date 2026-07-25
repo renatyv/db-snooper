@@ -23,6 +23,12 @@ For each table:
        - Top 10 most frequent values with counts when they are informative. Only if n_rows <= 100K and indexed. n_rows > 100K and indexed - read most_common_vals/most_common_freqs from pg_stats, or the equivalent histogram buckets in MySQL/MariaDB, if present. rows > 100K and unindexed, or no catalog stats available: skip.
 3. LLM summarization (done separately): A short summary, or minimal profile, identifies the meaning and format of each field and table. If source code is available, use it to produce better summaries.
 
+## Reliability
+- Don't crash on exceptions, just skip the metric.
+- JSON doesn't support `COUNT(distinct)`. Some other columns can't do that either. Think what we can quickly profile from these types. The number of elements for an array, all possible keys for JSON,...
+- When profiling JSON/JSONB, you need to provide reasonable gates so that requests don't hang if the JSON data stored is too large or if there are too many of them.
+- Migration frameworks for Java, Python, Ruby on Rails, and PHP almost always have standard table names. You should at least use these names and not profile these tables. Also, skip other technical tables used in web frameworks in Java, Python, Ruby, Typescript, PHP,...
+- Postgres supports fast sampling with `SELECT avg(col), stddev(col) FROM mytable TABLESAMPLE SYSTEM (1);`. Some other databases too. Use it when there are too many rows for appropriate metrics.
 
 ## Result example
 
