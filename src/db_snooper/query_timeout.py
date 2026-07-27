@@ -20,7 +20,7 @@ _MYSQL_TIMEOUT_STATEMENTS = (
 
 
 class QueryTimeout(Exception):
-    """Raised when a profiling/linking query exceeds the configured statement timeout."""
+    """Raised when a profiling query exceeds the configured statement timeout."""
 
 
 def apply_query_timeout(conn: Connection, seconds: int) -> None:

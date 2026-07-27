@@ -1,13 +1,12 @@
 [project]
 name = "db-snooper"
-version = "0.0.11"
-description = "Generate compact, LLM-ready database context with schema profiles and inferred join links."
+version = "0.0.12"
+description = "Generate compact, LLM-ready database context with schema profiles and per-column data summaries."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENCE"]
 dependencies = [
-    "datasketch>=1.6",
     "sqlalchemy>=2.0",
     "pymysql>=1.1",
     "psycopg>=3.2",

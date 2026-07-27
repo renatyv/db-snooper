@@ -7,12 +7,9 @@ DB Snooper generates compact, LLM-ready database context for SQL generation, que
 
 **Specification: [`spec/main.md`](spec/main.md)**
 
-It inspects an existing database and produces two artifacts:
+It inspects an existing database and produces a SQL profile (`<database>/<schema>.sql`): DDL, row counts, sampled rows, and per-column summaries. Use `--per-table` for one `.sql` per table.
 
-- A SQL profile (`<database>/<schema>.sql`): DDL, row counts, sampled rows, and per-column summaries. Use `--per-table` for one `.sql` per table.
-- A schema-link report (`<database>/<schema>_schema_links.md`): declared PK/FK relationships and inferred join candidates.
-
-AI agents and text-to-SQL pipelines can read this context instead of guessing table meanings or join paths.
+AI agents and text-to-SQL pipelines can read this context instead of guessing table meanings.
 
 ## Quick Start
 
@@ -26,13 +23,7 @@ Or run instantly with `uvx` (no install needed):
 uvx db-snooper profile --db-type mysql --user user --password password --database db --schema sch --port 3306
 ```
 
-This creates a profile at `db/sch.sql`. To (re)generate just the schema-link report for the same database:
-
-```bash
-db-snooper links --db-type mysql --user user --password password --database db --schema sch --port 3306
-```
-
-The schema-link report lists declared PK/FK joins and inferred join candidates with evidence labels. See [What The Outputs Contain](#what-the-outputs-contain) for details.
+This creates a profile at `db/sch.sql`.
 
 ## What The Outputs Contain
 
@@ -48,20 +39,11 @@ The profile `.sql` file contains:
 - Redacted values for sensitive column names containing `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token`.
 - A `-- skipped technical tables:` line naming migration/framework tables excluded from the profile.
 
-The schema links `.md` file contains:
-
-- Declared primary-key and foreign-key links from database constraints.
-- Inferred links from name, type, cardinality, and containment evidence.
-- Evidence labels for each inferred join candidate.
-
-Treat inferred links as candidates, not guaranteed joins. Validate them against the user question and the generated profile before writing final SQL.
-
 ## Database Examples
 
 ### SQLite
 ```bash
 db-snooper profile --db-type sqlite --database path/to/app.sqlite
-db-snooper links --db-type sqlite --database path/to/app.sqlite
 ```
 
 ### PostgreSQL
@@ -70,27 +52,19 @@ Profile
 db-snooper profile --db-type postgres --database app_db --schema sch --user readonly_user --host localhost --port 5432 --ask-password
 ```
 
-Schema links
-```bash
-db-snooper links --db-type postgres --database app_db --schema sch  --user readonly_user --host localhost --port 5432 --ask-password
-```
-
 ### MySQL
 ```bash
 db-snooper profile --db-type mysql --database app_db --user readonly_user --host localhost --port 3306 --ask-password
-db-snooper links --db-type mysql --database app_db --user readonly_user --host localhost --port 3306 --ask-password
 ```
 
 ### MariaDB
 ```bash
 db-snooper profile --db-type mariadb --database app_db --user readonly_user --host localhost --port 3306 --ask-password
-db-snooper links --db-type mariadb --database app_db --user readonly_user --host localhost --port 3306 --ask-password
 ```
 
 ### DuckDB
 ```bash
 db-snooper profile --db-type duckdb --database warehouse.duckdb --schema sch
-db-snooper links --db-type duckdb --database warehouse.duckdb --schema sch
 ```
 
 ## Environment Variables
@@ -120,21 +94,19 @@ For server databases, `--host` defaults to `localhost`, `--port` defaults to the
 ```bash
 db-snooper -h
 db-snooper profile -h
-db-snooper links -h
 ```
 
 Table filters:
 
 ```bash
 db-snooper profile --db-type sqlite --database app.sqlite --include-tables users,orders,line_items
-db-snooper links --db-type sqlite --database app.sqlite --exclude-tables audit_log,temp_imports
 ```
 
 Schema filter:
 
 ```bash
 db-snooper profile --db-type postgres --database app_db --schema reporting --user readonly_user --port 5432 --ask-password
-DB_SNOOPER_SCHEMA=reporting db-snooper links --db-type postgres --database app_db --user readonly_user --port 5432 --ask-password
+DB_SNOOPER_SCHEMA=reporting db-snooper profile --db-type postgres --database app_db --user readonly_user --port 5432 --ask-password
 ```
 
 Profile options:
@@ -147,32 +119,23 @@ Profile options:
 - `--include-technical-tables`: profile migration/framework tables (e.g. `schema_migrations`, `alembic_version`, `flyway_schema_history`, `django_migrations`) that are skipped by default.
 - `--per-table`: generate one `.sql` profile for each table instead of a single schema profile.
 
-Schema-link options:
-
-- `--include-tables table_a,table_b`: only inspect selected tables.
-- `--exclude-tables table_c`: skip selected tables.
-- `--include-technical-tables`: link migration/framework tables that are skipped by default.
-- `--containment-threshold 0.8`: minimum exact containment for inferred links.
-- `--max-distinct-values 10000`: maximum distinct values loaded per candidate column.
-
 ## Python API
 
 Use the simple helpers when you have a SQLAlchemy URL:
 
 ```python
-from db_snooper import generate_profile, generate_schema_links
+from db_snooper import generate_profile
 
 database_url = "sqlite:///eval-dataset/superhero/superhero.sqlite"
 
 profile_sql = generate_profile(database_url)
-schema_links_md = generate_schema_links(database_url)
 ```
 
 Use the lower-level API when you already have a SQLAlchemy engine or need options:
 
 ```python
 from sqlalchemy import create_engine
-from db_snooper import ProfileOptions, SchemaLinkOptions, link_schema, profile_database
+from db_snooper import ProfileOptions, profile_database
 
 engine = create_engine("sqlite:///eval-dataset/superhero/superhero.sqlite")
 
@@ -180,21 +143,18 @@ profile_sql = profile_database(
     engine,
     ProfileOptions(sample_row_limit=25, include_tables=frozenset({"superhero", "publisher"})),
 )
-schema_links_md = link_schema(
-    engine,
-    SchemaLinkOptions(containment_threshold=0.9),
-)
 ```
 
 ## Agent Skills
 
-DB Snooper ships reusable [agent skills](https://opencode.ai/docs/skills/) that teach AI agents when and how to profile a database and discover join links. Three skills are bundled:
+DB Snooper ships reusable [agent skills](https://opencode.ai/docs/skills/) that teach AI agents when and how to profile a database. Two skills are bundled:
 
 | Skill | Triggers on | Command | Output |
 |---|---|---|---|
 | `db-snooper-profile` | profiling, schema/data context, table summaries, column distributions | `db-snooper profile` | `<db>/<schema>.sql` |
-| `db-snooper-schema-links` | join paths, relationships, FK discovery, schema links | `db-snooper links` | `<db>/<schema>_schema_links.md` |
-| `db-snooper-context` | both / general text-to-SQL context | profile then links | both files |
+| `db-snooper-context` | general text-to-SQL context | `db-snooper profile` | `<db>/<schema>.sql` |
+
+Join-path discovery (declared PK/FK plus inferred candidates) now lives in the separate [`schema-linker`](https://github.com/renatyv) tool.
 
 List the bundled skills:
 

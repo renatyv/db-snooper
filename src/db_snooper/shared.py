@@ -6,7 +6,7 @@ from pathlib import Path
 SENSITIVE_NAME_PARTS = ("password", "passwd", "pwd", "hash", "salt", "secret", "token")
 
 # Migration-framework and DB-internal tables with no analytical value. Excluded
-# from profiling/linking by default; case-insensitive match on the table name.
+# from profiling by default; case-insensitive match on the table name.
 TECHNICAL_TABLES = frozenset(
     {
         # Rails / Active Record

@@ -8,9 +8,6 @@ This file is informational and is not legal advice. Check each upstream project 
 
 | Package | Used by | License |
 | --- | --- | --- |
-| `datasketch` | Required | MIT |
-| `numpy` | Transitive dependency of `datasketch` | BSD-3-Clause |
-| `scipy` | Transitive dependency of `datasketch` | BSD-3-Clause, with bundled binary notices for some wheels |
 | `sqlalchemy` | Required | MIT |
 | `greenlet` | Transitive dependency of `sqlalchemy` on supported platforms | MIT |
 | `typing-extensions` | Transitive dependency of `sqlalchemy` on some Python versions | PSF-2.0 |

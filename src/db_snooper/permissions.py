@@ -29,7 +29,7 @@ def check_permissions(
     schema: str | None,
     table_names: list[str],
 ) -> PermissionReport:
-    """Probe the connected user's privileges before profiling or linking.
+    """Probe the connected user's privileges before profiling.
 
     Checks three things:
       1. Table discovery (implicitly confirmed if *table_names* is non-empty).
