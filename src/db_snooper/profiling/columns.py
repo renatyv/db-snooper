@@ -95,8 +95,6 @@ def profile_column(
         summary.extend((f"nulls={nulls}", f"non_nulls={non_nulls}"))
     if distinct_count is not None:
         summary.append(f"distinct={distinct_count}")
-    if not distinct_supported and not sensitive:
-        summary.append("type=unprofiled")
     lines = [
         f"-- {column.name}: {', '.join(summary) if summary else 'profile metrics skipped'}"
     ]
@@ -114,18 +112,21 @@ def profile_column(
                         f"max={format_value(max_value)}",
                     )
                 )
-        if total_rows <= 1_000_000 or (
-            total_rows <= 10_000_000 and indexed
-        ):
-            with query_timeout.metric(conn, skipped, "average"):
-                average = query_timeout.execute(
-                    conn, select(func.avg(column)).select_from(table)
-                ).scalar_one()
-                numeric.append(f"average={format_value(average)}")
-        if total_rows < 100_000:
-            with query_timeout.metric(conn, skipped, "median"):
-                median = median_value(conn, table, column)
-                numeric.append(f"median={format_value(median)}")
+        # No need to compute average or median id
+        col_name: str = column.name
+        if col_name != "id" and not col_name.endswith("_id"):
+            if total_rows <= 1_000_000 or (
+                total_rows <= 10_000_000 and indexed
+            ):
+                with query_timeout.metric(conn, skipped, "average"):
+                    average = query_timeout.execute(
+                        conn, select(func.avg(column)).select_from(table)
+                    ).scalar_one()
+                    numeric.append(f"average={format_value(average)}")
+            if total_rows < 100_000:
+                with query_timeout.metric(conn, skipped, "median"):
+                    median = median_value(conn, table, column)
+                    numeric.append(f"median={format_value(median)}")
         if numeric:
             lines.append(f"-- {column.name} numeric: {', '.join(numeric)}")
 
