@@ -4,6 +4,7 @@
 - Use `uv` to manage dependencies.
 - Put sources in `src/` and tests in `test` or `tests`.
 - Add a simple README that explains how to run the command. Include examples for SQLite, PostgreSQL, and MariaDB. Use non-native (pure python) connectors if possible to simplify use.
+- If SQLAlchemy's inspection fails, use output of `pg_dump`, `mysqldump`, or `mariadb-dump` to create CREATE_TABLE sequences. Parse their outputs to emit profile in the required format.
 
 - CLI interface: profile generation.
   - Infer host, login, and password from environment variables and/or CLI arguments.
