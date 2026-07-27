@@ -83,7 +83,9 @@ def install_skills(target: str, dest_dir: str | None, force: bool) -> int:
         for name, src in skills:
             out_dir = dest / name
             if out_dir.exists() and not force:
-                print(f"  skipped   {name} -> {out_dir} (exists; use --force to overwrite)")
+                print(
+                    f"  skipped   {name} -> {out_dir} (exists; use --force to overwrite)"
+                )
                 skipped += 1
                 continue
             if out_dir.exists():
@@ -103,7 +105,9 @@ def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="skills_command", required=True)
     sub.add_parser("list", help="List bundled skills.")
-    install = sub.add_parser("install", help="Copy bundled skills into an agent discovery directory.")
+    install = sub.add_parser(
+        "install", help="Copy bundled skills into an agent discovery directory."
+    )
     install.add_argument(
         "--target",
         choices=[*TARGET_DIRS.keys(), "all"],

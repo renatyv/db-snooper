@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from sqlalchemy import create_engine
-from sqlalchemy.engine import Engine, URL
+from sqlalchemy.engine import URL, Engine
 
 from db_snooper.profiling import ProfileOptions, ProfileProgress, profile_database
 
@@ -16,10 +16,15 @@ def generate_profile(
     progress: ProfileProgress | None = None,
 ) -> str:
     """Generate a SQL profile from a SQLAlchemy engine or database URL."""
-    return _generate_with_engine(database, lambda engine: profile_database(engine, options or ProfileOptions(), progress))
+    return _generate_with_engine(
+        database,
+        lambda engine: profile_database(engine, options or ProfileOptions(), progress),
+    )
 
 
-def _generate_with_engine(database: DatabaseInput, generate: Callable[[Engine], str]) -> str:
+def _generate_with_engine(
+    database: DatabaseInput, generate: Callable[[Engine], str]
+) -> str:
     if isinstance(database, Engine):
         return generate(database)
 

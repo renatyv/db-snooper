@@ -6,7 +6,9 @@ from db_snooper.profiling import cli as profiling_cli
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Snoop through databases and generate LLM-ready SQL context.")
+    parser = argparse.ArgumentParser(
+        description="Snoop through databases and generate LLM-ready SQL context."
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("profile", help="Generate a SQL profile for a database.")
     subparsers.add_parser("skills", help="Install or list bundled agent skills.")

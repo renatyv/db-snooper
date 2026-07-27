@@ -135,29 +135,21 @@ def profile_table(
     return lines
 
 
-def sample_rows(
-    conn: Connection, table: Table, limit: int
-) -> list[dict[str, Any]]:
+def sample_rows(conn: Connection, table: Table, limit: int) -> list[dict[str, Any]]:
     order_columns = list(table.primary_key.columns) or list(table.columns)
     statement = select(table).order_by(*order_columns).limit(limit)
     return rows_for_statement(conn, table, statement)
 
 
-def latest_rows(
-    conn: Connection, table: Table, limit: int
-) -> list[dict[str, Any]]:
+def latest_rows(conn: Connection, table: Table, limit: int) -> list[dict[str, Any]]:
     order_columns = list(table.primary_key.columns) or list(table.columns)
     statement = (
-        select(table)
-        .order_by(*(desc(column) for column in order_columns))
-        .limit(limit)
+        select(table).order_by(*(desc(column) for column in order_columns)).limit(limit)
     )
     return rows_for_statement(conn, table, statement)
 
 
-def random_rows(
-    conn: Connection, table: Table, limit: int
-) -> list[dict[str, Any]]:
+def random_rows(conn: Connection, table: Table, limit: int) -> list[dict[str, Any]]:
     random_function = (
         func.rand() if conn.dialect.name in {"mysql", "mariadb"} else func.random()
     )

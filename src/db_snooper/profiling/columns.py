@@ -14,10 +14,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.schema import UniqueConstraint
 from sqlalchemy.sql.sqltypes import (
     JSON,
-    LargeBinary,
     BigInteger,
     Float,
     Integer,
+    LargeBinary,
     Numeric,
     SmallInteger,
     String,
@@ -31,9 +31,9 @@ _logger = logging.getLogger("db_snooper")
 
 # JSON/JSONB profiling gates: keep key extraction bounded so a single oversized
 # value or a very large table cannot hang the profile.
-JSON_PROFILE_ROW_LIMIT = 100_000   # don't attempt JSON key extraction above this
-JSON_SAMPLE_LIMIT = 1_000          # max JSON values read for key extraction
-JSON_MAX_VALUE_BYTES = 65_536      # skip individual JSON values larger than 64KB
+JSON_PROFILE_ROW_LIMIT = 100_000  # don't attempt JSON key extraction above this
+JSON_SAMPLE_LIMIT = 1_000  # max JSON values read for key extraction
+JSON_MAX_VALUE_BYTES = 65_536  # skip individual JSON values larger than 64KB
 
 
 def profile_column(
@@ -115,9 +115,7 @@ def profile_column(
         # No need to compute average or median id
         col_name: str = column.name
         if col_name != "id" and not col_name.endswith("_id"):
-            if total_rows <= 1_000_000 or (
-                total_rows <= 10_000_000 and indexed
-            ):
+            if total_rows <= 1_000_000 or (total_rows <= 10_000_000 and indexed):
                 with query_timeout.metric(conn, skipped, "average"):
                     average = query_timeout.execute(
                         conn, select(func.avg(column)).select_from(table)
@@ -194,10 +192,7 @@ def median_value(conn: Connection, table: Table, column: Any) -> Any:
         percentile = func.percentile_cont(0.5).within_group(column).over()
         return query_timeout.execute(
             conn,
-            select(percentile)
-            .select_from(table)
-            .where(column.is_not(None))
-            .limit(1),
+            select(percentile).select_from(table).where(column.is_not(None)).limit(1),
         ).scalar_one()
 
     ordered = (
@@ -251,8 +246,7 @@ def get_catalog_top_values(
                         "AND attname = :column"
                     ),
                     {
-                        "schema": table.schema
-                        or conn.dialect.default_schema_name,
+                        "schema": table.schema or conn.dialect.default_schema_name,
                         "table": table.name,
                         "column": column.name,
                     },
@@ -272,8 +266,7 @@ def get_catalog_top_values(
                         "AND COLUMN_NAME = :column"
                     ),
                     {
-                        "schema": table.schema
-                        or conn.dialect.default_schema_name,
+                        "schema": table.schema or conn.dialect.default_schema_name,
                         "table": table.name,
                         "column": column.name,
                     },
@@ -294,9 +287,7 @@ def parse_postgres_array(value: str) -> list[str]:
     )
 
 
-def mysql_histogram_values(
-    histogram: Any, total_rows: int
-) -> list[tuple[Any, int]]:
+def mysql_histogram_values(histogram: Any, total_rows: int) -> list[tuple[Any, int]]:
     if isinstance(histogram, str):
         histogram = json.loads(histogram)
     if (
@@ -338,9 +329,7 @@ def get_shape_summary(
         or distinct_count <= 1
     ):
         return None
-    values = [
-        value for value, _count in top_values[:10] if isinstance(value, str)
-    ]
+    values = [value for value, _count in top_values[:10] if isinstance(value, str)]
     if not values:
         return None
     shapes: dict[str, int] = {}
@@ -363,9 +352,7 @@ def value_shape(value: str) -> str | None:
         return "empty"
     if re.fullmatch(r"[A-Z]{2,}\d+", value):
         return "UPPER+digits"
-    if re.fullmatch(
-        r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", value
-    ):
+    if re.fullmatch(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", value):
         return "email"
     if re.fullmatch(r"\+?[\d .()/-]{7,}", value):
         return "phone"
@@ -377,9 +364,7 @@ def value_shape(value: str) -> str | None:
 
 
 def is_numeric(column: Any) -> bool:
-    return isinstance(
-        column.type, (Integer, BigInteger, SmallInteger, Numeric, Float)
-    )
+    return isinstance(column.type, (Integer, BigInteger, SmallInteger, Numeric, Float))
 
 
 def is_json(column: Any) -> bool:
@@ -513,11 +498,7 @@ def _array_length_expr(conn: Connection, column: Any):
 
 def is_identifier_name(column_name: str) -> bool:
     lower_name = column_name.lower()
-    return (
-        lower_name == "id"
-        or lower_name.endswith("_id")
-        or lower_name.endswith("id")
-    )
+    return lower_name == "id" or lower_name.endswith("_id") or lower_name.endswith("id")
 
 
 def format_value_counts(values: list[tuple[Any, int]]) -> str:

@@ -69,12 +69,8 @@ def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
         action="store_true",
         help="Write one .sql profile per table instead of one schema profile.",
     )
-    parser.add_argument(
-        "--include-tables", help="Comma-separated table allowlist."
-    )
-    parser.add_argument(
-        "--exclude-tables", help="Comma-separated table denylist."
-    )
+    parser.add_argument("--include-tables", help="Comma-separated table allowlist.")
+    parser.add_argument("--exclude-tables", help="Comma-separated table denylist.")
     parser.add_argument(
         "--include-technical-tables",
         action="store_true",
@@ -126,9 +122,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     output_dir = (
         Path(args.output)
         if args.output
-        else default_output_path(
-            args.database or os.environ["DB_SNOOPER_DATABASE"]
-        )
+        else default_output_path(args.database or os.environ["DB_SNOOPER_DATABASE"])
     )
     try:
         for schema in schemas:
@@ -165,9 +159,9 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
                         permission_report=perm_report,
                     )
                     if table_output.strip():
-                        (
-                            schema_dir / f"{output_component(table_name)}.sql"
-                        ).write_text(table_output, encoding="utf-8")
+                        (schema_dir / f"{output_component(table_name)}.sql").write_text(
+                            table_output, encoding="utf-8"
+                        )
             else:
                 output = profile_database(
                     engine,
@@ -177,9 +171,9 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
                     skipped_technical_tables=skipped_technical,
                 )
                 output_dir.mkdir(parents=True, exist_ok=True)
-                (
-                    output_dir / f"{output_component(schema)}.sql"
-                ).write_text(output, encoding="utf-8")
+                (output_dir / f"{output_component(schema)}.sql").write_text(
+                    output, encoding="utf-8"
+                )
     except Exception:
         progress_bar.finish()
         raise
