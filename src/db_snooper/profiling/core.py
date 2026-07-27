@@ -82,13 +82,33 @@ def profile_database(
             _logger.warning("No accessible tables to profile; skipping schema.")
             return "\n".join(lines).rstrip() + "\n"
         metadata = MetaData()
+        failed_ddl_tables: list[str] = []
+        failed_profile_tables: list[str] = []
         for index, table_name in enumerate(tables, start=1):
             if progress is not None:
                 progress(index - 1, len(tables), table_name)
             table = Table(
                 table_name, metadata, schema=options.schema, autoload_with=conn
             )
-            ddl = get_table_ddl(conn, table)
+            try:
+                ddl = get_table_ddl(conn, table)
+            except Exception as exc:
+                _logger.warning(
+                    "Skipped table '%s': could not generate DDL (%s: %s)",
+                    table_name,
+                    type(exc).__name__,
+                    exc,
+                )
+                failed_ddl_tables.append(table_name)
+                lines.append(
+                    f"-- {table_name}: skipped (DDL generation failed: "
+                    f"{type(exc).__name__}: {exc})"
+                )
+                lines.append("")
+                lines.append("")
+                if progress is not None:
+                    progress(index, len(tables), table_name)
+                continue
             lines.extend(ddl)
             if lines[-1] != "":
                 lines.append("")
@@ -98,13 +118,40 @@ def profile_database(
                     progress(
                         index - 1, len(tables), f"{table_name} ({column_name})"
                     )
-
-            lines.extend(
-                profile_table(conn, table, options, report_column=report_column)
-            )
+            try:
+                table_prodile_strings = profile_table(conn, table, options, report_column=report_column)
+                lines.extend(
+                    table_prodile_strings
+                )
+            except Exception as exc:
+                _logger.warning(
+                    "Skipped table '%s': could not generate profile (%s: %s)",
+                    table_name,
+                    type(exc).__name__,
+                    exc,
+                )
+                failed_profile_tables.append(table_name)
             lines.append("")
             lines.append("")
             if progress is not None:
                 progress(index, len(tables), table_name)
+
+    if failed_ddl_tables:
+        summary = (
+            f"Skipped {len(failed_ddl_tables)} table(s) due to DDL generation "
+            f"errors: {', '.join(failed_ddl_tables)}"
+        )
+        _logger.warning(summary)
+        lines.append(f"-- {summary}")
+        lines.append("")
+
+    if failed_profile_tables:
+        summary = (
+            f"Skipped {len(failed_profile_tables)} table(s) due to Profile generation "
+            f"errors: {', '.join(failed_profile_tables)}"
+        )
+        _logger.warning(summary)
+        lines.append(f"-- {summary}")
+        lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
