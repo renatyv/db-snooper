@@ -112,9 +112,9 @@ def profile_column(
                         f"max={format_value(max_value)}",
                     )
                 )
-        # No need to compute average or median id
-        col_name: str = column.name
-        if col_name != "id" and not col_name.endswith("_id"):
+        col_name = str(column.name)
+        include_avg_median = col_name != "id" and not col_name.endswith("_id")
+        if include_avg_median:
             if total_rows <= 1_000_000 or (total_rows <= 10_000_000 and indexed):
                 with query_timeout.metric(conn, skipped, "average"):
                     average = query_timeout.execute(
