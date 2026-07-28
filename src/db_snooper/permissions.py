@@ -133,14 +133,23 @@ def _check_mysql_tables(
 
 
 def _check_mysql_stats(conn: Connection) -> dict[str, bool]:
-    return {
+    # MariaDB stores engine-independent statistics in mysql.column_stats; MySQL
+    # 8+ exposes histograms via information_schema.COLUMN_STATISTICS. The two are
+    # mutually exclusive, so probe the one that matches the actual server.
+    stats: dict[str, bool] = {
         "information_schema.tables": _probe_success(
             conn, "SELECT 1 FROM information_schema.TABLES LIMIT 1"
         ),
-        "information_schema.column_statistics": _probe_success(
-            conn, "SELECT 1 FROM information_schema.COLUMN_STATISTICS LIMIT 1"
-        ),
     }
+    if getattr(conn.dialect, "is_mariadb", False):
+        stats["mysql.column_stats"] = _probe_success(
+            conn, "SELECT 1 FROM mysql.column_stats LIMIT 1"
+        )
+    else:
+        stats["information_schema.column_statistics"] = _probe_success(
+            conn, "SELECT 1 FROM information_schema.COLUMN_STATISTICS LIMIT 1"
+        )
+    return stats
 
 
 def _probe_success(conn: Connection, sql: str, params: dict | None = None) -> bool:
@@ -189,7 +198,8 @@ def format_warnings(report: PermissionReport) -> list[str]:
         names = ", ".join(sorted(missing))
         warnings.append(f"Catalog stats unreadable: {names}.")
         warnings.append(
-            "  Row-count estimates may fall back to exact COUNT(*); column histograms will be skipped."
+            "  Catalog-derived estimates (null fraction, distinct, ranges, top "
+            "values) will be unavailable for large tables."
         )
 
     return warnings

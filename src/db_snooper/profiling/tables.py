@@ -8,10 +8,17 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.schema import CreateIndex, CreateTable
 
 from db_snooper import query_timeout
-from db_snooper.database_stats import estimate_row_count, get_indexed_column_names
+from db_snooper.database_stats import (
+    estimate_row_count,
+    get_catalog_column_stats,
+    get_indexed_column_names,
+)
 from db_snooper.profiling.columns import (
     JSON_MAX_VALUE_BYTES,
+    format_value,
+    format_value_counts,
     get_unique_column_names,
+    is_numeric,
     json_dumps,
     jsonable,
     profile_column,
@@ -65,13 +72,51 @@ def get_reflected_ddl(conn: Connection, table: Table) -> list[str]:
     return lines
 
 
-def profile_table_from_stats(table: Table, estimate: int) -> list[str]:
-    # DDL (emitted separately by profile_database) already lists the columns,
-    # so no further queries are needed here.
-    return [
+def profile_table_from_stats(
+    conn: Connection, table: Table, estimate: int
+) -> list[str]:
+    # The table is too large to scan, but its catalog stats are free. Emit a
+    # per-column summary derived entirely from those stats.
+    lines = [
         f"-- total rows≈{estimate} "
         "(estimated from catalog stats; row/column profiling skipped)"
     ]
+    catalog = get_catalog_column_stats(conn, table, estimate)
+    for column in table.columns:
+        stat = catalog.get(column.name)
+        if stat is None:
+            continue
+        lines.extend(_catalog_column_lines(column, stat, estimate))
+    return lines
+
+
+def _catalog_column_lines(column: Any, stat: Any, estimate: int) -> list[str]:
+    parts: list[str] = []
+    if stat.null_frac is not None:
+        nulls = round(stat.null_frac * estimate)
+        parts.extend((f"nulls≈{nulls}", f"non_nulls≈{estimate - nulls}"))
+    if stat.distinct is not None:
+        parts.append(f"distinct≈{stat.distinct}")
+    lines: list[str] = []
+    if parts:
+        lines.append(f"-- {column.name} (catalog): {', '.join(parts)}")
+    if (
+        is_numeric(column)
+        and stat.min_value is not None
+        and stat.max_value is not None
+    ):
+        lines.append(
+            f"-- {column.name} numeric (catalog): "
+            f"min≈{format_value(stat.min_value)}, max≈{format_value(stat.max_value)}"
+        )
+    # Top values can expose real column values, so suppress them for sensitive
+    # columns (mirrors the exact profiling path).
+    if stat.top_values and not is_sensitive(column.name):
+        lines.append(
+            f"-- {column.name} top_values (catalog): "
+            f"{format_value_counts(list(stat.top_values))}"
+        )
+    return lines
 
 
 def profile_table(
@@ -82,7 +127,7 @@ def profile_table(
 ) -> list[str]:
     estimate = estimate_row_count(conn, table)
     if estimate is not None and estimate >= options.large_table_threshold:
-        return profile_table_from_stats(table, estimate)
+        return profile_table_from_stats(conn, table, estimate)
     try:
         total_rows = query_timeout.execute(
             conn, select(func.count()).select_from(table)
@@ -118,6 +163,14 @@ def profile_table(
 
     unique_columns = get_unique_column_names(table)
     indexed_columns = get_indexed_column_names(table)
+    # Catalog stats are fetched once per table (a single cheap catalog read) and
+    # reused across columns: for catalog top_values on large indexed columns and
+    # as a labeled fallback when an exact metric is skipped.
+    catalog_stats = (
+        get_catalog_column_stats(conn, table, total_rows)
+        if total_rows > 100_000
+        else {}
+    )
     for column in table.columns:
         if report_column is not None:
             report_column(column.name)
@@ -130,6 +183,7 @@ def profile_table(
                 unique_columns,
                 indexed_columns,
                 options.query_timeout,
+                catalog_stat=catalog_stats.get(column.name),
             )
         )
     return lines

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import json
 import logging
 import re
@@ -8,9 +7,8 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import ARRAY, Table, func, literal_column, select, text
+from sqlalchemy import ARRAY, Table, func, literal_column, select
 from sqlalchemy.engine import Connection
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.schema import UniqueConstraint
 from sqlalchemy.sql.sqltypes import (
     JSON,
@@ -25,6 +23,7 @@ from sqlalchemy.sql.sqltypes import (
 )
 
 from db_snooper import query_timeout
+from db_snooper.database_stats import get_catalog_column_stats
 from db_snooper.shared import is_sensitive
 
 _logger = logging.getLogger("db_snooper")
@@ -44,6 +43,7 @@ def profile_column(
     unique_columns: set[str],
     indexed_columns: set[str],
     timeout_seconds: int,
+    catalog_stat: Any = None,
 ) -> list[str]:
     indexed = column.name in indexed_columns
     counts_available = total_rows <= 5_000_000 or indexed
@@ -93,14 +93,24 @@ def profile_column(
         summary.append("unique identifier")
     if non_nulls is not None:
         summary.extend((f"nulls={nulls}", f"non_nulls={non_nulls}"))
+    elif catalog_stat is not None and catalog_stat.null_frac is not None:
+        # Exact count skipped (table too large/unindexed, or query timed out);
+        # fall back to the catalog null fraction.
+        catalog_nulls = round(catalog_stat.null_frac * total_rows)
+        summary.extend(
+            (f"nulls≈{catalog_nulls}", f"non_nulls≈{total_rows - catalog_nulls}")
+        )
     if distinct_count is not None:
         summary.append(f"distinct={distinct_count}")
+    elif catalog_stat is not None and catalog_stat.distinct is not None:
+        summary.append(f"distinct≈{catalog_stat.distinct}")
     lines = [
         f"-- {column.name}: {', '.join(summary) if summary else 'profile metrics skipped'}"
     ]
 
     if is_numeric(column):
         numeric = []
+        have_range = False
         if total_rows <= 5_000_000 or indexed:
             with query_timeout.metric(conn, skipped, "min/max"):
                 min_value, max_value = query_timeout.execute(
@@ -112,6 +122,19 @@ def profile_column(
                         f"max={format_value(max_value)}",
                     )
                 )
+                have_range = True
+        if (
+            not have_range
+            and catalog_stat is not None
+            and catalog_stat.min_value is not None
+            and catalog_stat.max_value is not None
+        ):
+            numeric.extend(
+                (
+                    f"min≈{format_value(catalog_stat.min_value)}",
+                    f"max≈{format_value(catalog_stat.max_value)}",
+                )
+            )
         col_name = str(column.name)
         include_avg_median = col_name != "id" and not col_name.endswith("_id")
         if include_avg_median:
@@ -144,7 +167,9 @@ def profile_column(
                         f"-- {column.name} top_values: {format_value_counts(top_values)}"
                     )
         elif total_rows > 100_000 and indexed:
-            top_values = get_catalog_top_values(conn, table, column, total_rows)
+            top_values = (
+                list(catalog_stat.top_values) if catalog_stat is not None else []
+            )
             if top_values:
                 lines.append(
                     f"-- {column.name} top_values (catalog): "
@@ -236,72 +261,11 @@ def get_value_counts(
 def get_catalog_top_values(
     conn: Connection, table: Table, column: Any, total_rows: int
 ) -> list[tuple[Any, int]]:
-    try:
-        with conn.begin_nested():
-            if conn.dialect.name == "postgresql":
-                row = conn.execute(
-                    text(
-                        "SELECT most_common_vals::text, most_common_freqs "
-                        "FROM pg_stats WHERE schemaname = :schema AND tablename = :table "
-                        "AND attname = :column"
-                    ),
-                    {
-                        "schema": table.schema or conn.dialect.default_schema_name,
-                        "table": table.name,
-                        "column": column.name,
-                    },
-                ).one_or_none()
-                if not row or not row[0] or not row[1]:
-                    return []
-                values = parse_postgres_array(row[0])
-                return [
-                    (value, max(1, round(float(frequency) * total_rows)))
-                    for value, frequency in zip(values, row[1])
-                ][:10]
-            if conn.dialect.name == "mysql":
-                histogram = conn.execute(
-                    text(
-                        "SELECT HISTOGRAM FROM information_schema.COLUMN_STATISTICS "
-                        "WHERE SCHEMA_NAME = :schema AND TABLE_NAME = :table "
-                        "AND COLUMN_NAME = :column"
-                    ),
-                    {
-                        "schema": table.schema or conn.dialect.default_schema_name,
-                        "table": table.name,
-                        "column": column.name,
-                    },
-                ).scalar_one_or_none()
-                return mysql_histogram_values(histogram, total_rows)
-    except SQLAlchemyError:
-        return []
-    return []
-
-
-def parse_postgres_array(value: str) -> list[str]:
-    # pg_stats exposes anyarray, which drivers cannot decode without knowing the
-    # underlying type. Its text form uses standard PostgreSQL array quoting.
-    if not (value.startswith("{") and value.endswith("}")):
-        return []
-    return next(
-        csv.reader([value[1:-1]], delimiter=",", quotechar='"', escapechar="\\")
-    )
-
-
-def mysql_histogram_values(histogram: Any, total_rows: int) -> list[tuple[Any, int]]:
-    if isinstance(histogram, str):
-        histogram = json.loads(histogram)
-    if (
-        not isinstance(histogram, dict)
-        or histogram.get("histogram-type") != "singleton"
-    ):
-        return []
-    previous = 0.0
-    values = []
-    for value, cumulative_frequency in histogram.get("buckets", []):
-        frequency = float(cumulative_frequency) - previous
-        previous = float(cumulative_frequency)
-        values.append((value, max(1, round(frequency * total_rows))))
-    return sorted(values, key=lambda item: (-item[1], str(item[0])))[:10]
+    # Delegates to the shared catalog reader, which covers PostgreSQL pg_stats,
+    # MySQL singleton/equi-height histograms, and MariaDB mysql.column_stats.
+    stats = get_catalog_column_stats(conn, table, total_rows)
+    stat = stats.get(column.name)
+    return list(stat.top_values) if stat else []
 
 
 def get_unique_column_names(table: Table) -> set[str]:

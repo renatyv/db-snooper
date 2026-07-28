@@ -8,7 +8,7 @@ For each table:
 1. Generate `CREATE TABLE` DDL with all indexes and constraints.
 2. Generate a data profile.
    - Use query timouts to prevent hanging queries. If a query runs for 10s or more -> abort the query and skip this metric
-   - Use internal database stats to estimate number of rows. If its hundreds of millions or more -> use the internal stats to generate profile, don't run any queries
+   - Use internal database stats to estimate number of rows. If its hundreds of millions or more -> use the internal stats to generate profile, don't run any queries. Instead, summarize each column from the engine's catalog statistics (PostgreSQL `pg_stats`, MySQL `COLUMN_STATISTICS` histograms, MariaDB `mysql.column_stats`): approximate null fraction, distinct count, numeric min/max, and top values. Mark these estimates with `≈` and a `(catalog)` tag so they are distinguishable from exact metrics.
    - If a table has fewer than 50 rows, include rows up to a small deterministic cap. Never dump values for sensitive fields. Treat column names containing `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token` as sensitive, and redact sampled rows and value profiles.
    - If a table has more than 50 rows, include the number of rows, three latest rows, and five random rows. Also generate per-column profiles:
      - If a column is all `NULL`, emit a one-line `all NULL` summary.
@@ -20,7 +20,8 @@ For each table:
        - average for numeric columns. If n_rows > 1M, then compute it only if column is indexed. If 1M < n_rows <= 10M, compute only if indexed. If n_rows > 10M, skip.
        - Median for numeric columns if number of n_rows < 100_000. Use native PERCENTILE_CONT for Postgres & mariadb, while MySQL needs ROW_NUMBER()/NTILE() over a full sort
        - Distinct value count. n_rows ≤ 100K: exact, COUNT(DISTINCT col); n_rows > 100K and ≤ 1M: exact, only if indexed; n_rows > 1M: don't run
-       - Top 10 most frequent values with counts when they are informative. Only if n_rows <= 100K and indexed. n_rows > 100K and indexed - read most_common_vals/most_common_freqs from pg_stats, or the equivalent histogram buckets in MySQL/MariaDB, if present. rows > 100K and unindexed, or no catalog stats available: skip.
+       - Top 10 most frequent values with counts when they are informative. Only if n_rows <= 100K and indexed. n_rows > 100K and indexed - read most_common_vals/most_common_freqs from pg_stats, MySQL `COLUMN_STATISTICS` histogram buckets, or MariaDB `mysql.column_stats` (JSON_HB singletons), if present. rows > 100K and unindexed, or no catalog stats available: skip.
+      - Catalog fallback for skipped metrics: when an exact null/non-null count, min/max, or distinct count is skipped because a column is unindexed and the table exceeds the row-count thresholds, fall back to the same catalog statistics and emit a labeled estimate (`nulls≈`, `non_nulls≈`, `min≈`, `max≈`, `distinct≈`). This applies on PostgreSQL, MySQL, and MariaDB where catalog stats are available.
 3. LLM summarization (done separately): A short summary, or minimal profile, identifies the meaning and format of each field and table. If source code is available, use it to produce better summaries.
 
 ## Reliability
