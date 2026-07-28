@@ -16,9 +16,10 @@ from db_snooper.connection import (
     resolve_schema,
 )
 from db_snooper.database_stats import LARGE_TABLE_THRESHOLD
-from db_snooper.permissions import check_permissions, format_warnings
+from db_snooper.permissions import PermissionReport, check_permissions
 from db_snooper.profiling.core import list_schema_tables, profile_database
 from db_snooper.profiling.models import ProfileOptions
+from db_snooper.profiling.suggestions import format_suggestions, profile_suggestions
 from db_snooper.progress import ProgressBar
 from db_snooper.query_timeout import DEFAULT_QUERY_TIMEOUT
 from db_snooper.shared import default_output_path, output_component, parse_table_set
@@ -114,6 +115,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     engine = create_engine(url)
     progress_bar = ProgressBar("Profiling", 0)
     active_schema = ""
+    permission_reports: list[PermissionReport] = []
 
     def show_progress(current: int, total: int, table_name: str) -> None:
         nonlocal progress_bar
@@ -145,17 +147,16 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
                     ", ".join(sorted(skipped_technical)),
                 )
             schema_dir = output_dir / output_component(schema)
+            with engine.connect() as conn:
+                perm_report = check_permissions(
+                    conn,
+                    engine.dialect.name,
+                    schema_options.schema,
+                    tables,
+                )
+            permission_reports.append(perm_report)
             if args.per_table:
                 schema_dir.mkdir(parents=True, exist_ok=True)
-                with engine.connect() as conn:
-                    perm_report = check_permissions(
-                        conn,
-                        engine.dialect.name,
-                        schema_options.schema,
-                        tables,
-                    )
-                for warning in format_warnings(perm_report):
-                    _logger.warning(warning)
                 accessible_tables = set(perm_report.accessible_tables)
                 for table_name in tables:
                     if table_name not in accessible_tables:
@@ -178,6 +179,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
                     progress=show_progress,
                     table_names=tables,
                     skipped_technical_tables=skipped_technical,
+                    permission_report=perm_report,
                 )
                 output_dir.mkdir(parents=True, exist_ok=True)
                 (output_dir / f"{output_component(schema)}.sql").write_text(
@@ -188,6 +190,11 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         raise
     else:
         progress_bar.finish("Profiling complete")
+        suggestions = format_suggestions(
+            profile_suggestions(permission_reports, engine.dialect.name)
+        )
+        if suggestions:
+            print(suggestions, file=sys.stderr)
     return 0
 
 

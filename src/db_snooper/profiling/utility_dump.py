@@ -19,6 +19,17 @@ _UTILITY_FOR_DIALECT: dict[str, str] = {
 _DUMP_TIMEOUT_SECONDS = 60
 
 
+def dump_utility_name(dialect_name: str) -> str | None:
+    """Return the optional DDL fallback utility used for a dialect."""
+    return _UTILITY_FOR_DIALECT.get(dialect_name)
+
+
+def dump_utility_available(dialect_name: str) -> bool:
+    """Return whether the dialect's optional DDL fallback is on PATH."""
+    binary_name = dump_utility_name(dialect_name)
+    return binary_name is None or shutil.which(binary_name) is not None
+
+
 def dump_create_table(
     url: URL,
     dialect_name: str,
@@ -30,7 +41,7 @@ def dump_create_table(
     Never raises: a missing binary, non-zero exit, parse miss, or subprocess
     error all return None so the caller can skip the table safely.
     """
-    binary_name = _UTILITY_FOR_DIALECT.get(dialect_name)
+    binary_name = dump_utility_name(dialect_name)
     if binary_name is None:
         _logger.debug(
             "No dump utility for dialect %r (table %s)", dialect_name, table_name
