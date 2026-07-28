@@ -17,6 +17,7 @@ class ProfileOptions:
     exclude_tables: frozenset[str] = frozenset()
     schema: str | None = None
     include_technical_tables: bool = False
+    use_dump_ddl: bool = False
 
 
 ProfileProgress = Callable[[int, int, str], None]

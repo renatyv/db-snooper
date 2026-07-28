@@ -79,6 +79,14 @@ def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
             "alembic_version, flyway_schema_history) that are skipped by default."
         ),
     )
+    parser.add_argument(
+        "--use-dump-ddl",
+        action="store_true",
+        help=(
+            "Always emit CREATE TABLE via pg_dump/mysqldump instead of SQLAlchemy "
+            "reflection (testing aid for the utility fallback)."
+        ),
+    )
     return parser
 
 
@@ -101,6 +109,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         exclude_tables=parse_table_set(args.exclude_tables) or frozenset(),
         schema=resolve_schema(args),
         include_technical_tables=args.include_technical_tables,
+        use_dump_ddl=args.use_dump_ddl,
     )
     engine = create_engine(url)
     progress_bar = ProgressBar("Profiling", 0)

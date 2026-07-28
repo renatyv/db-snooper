@@ -10,6 +10,7 @@ from db_snooper import __version__, query_timeout
 from db_snooper.permissions import PermissionReport, check_permissions, format_warnings
 from db_snooper.profiling.models import ProfileOptions, ProfileProgress
 from db_snooper.profiling.tables import get_table_ddl, profile_table
+from db_snooper.profiling.utility_dump import dump_create_table
 from db_snooper.shared import is_technical_table
 
 _logger = logging.getLogger("db_snooper")
@@ -87,12 +88,50 @@ def profile_database(
         for index, table_name in enumerate(tables, start=1):
             if progress is not None:
                 progress(index - 1, len(tables), table_name)
-            table = Table(
-                table_name, metadata, schema=options.schema, autoload_with=conn
-            )
+
+            table: Table | None = None
+            reflect_exc: Exception | None = None
             try:
-                ddl = get_table_ddl(conn, table)
+                table = Table(
+                    table_name, metadata, schema=options.schema, autoload_with=conn
+                )
             except Exception as exc:
+                reflect_exc = exc
+
+            ddl: list[str] | None = None
+            ddl_exc: Exception | None = None
+            if not options.use_dump_ddl and table is not None:
+                try:
+                    ddl = get_table_ddl(conn, table)
+                except Exception as exc:
+                    ddl_exc = exc
+
+            if ddl is None:
+                reason = (
+                    "forced (--use-dump-ddl)"
+                    if options.use_dump_ddl
+                    else f"SQLAlchemy DDL failed ({type((ddl_exc or reflect_exc)).__name__})"
+                )
+                _logger.info("Utility fallback for '%s': %s", table_name, reason)
+                fallback_schema = (
+                    table.schema if table is not None else None
+                ) or options.schema
+                try:
+                    ddl = dump_create_table(
+                        engine.url, engine.dialect.name, table_name, fallback_schema
+                    )
+                except Exception as exc:
+                    _logger.warning(
+                        "utility fallback errored for '%s': %r", table_name, exc
+                    )
+                    ddl = None
+                if ddl is not None:
+                    lines.append(
+                        f"-- {table_name}: CREATE TABLE via utility fallback"
+                    )
+
+            if ddl is None:
+                exc = ddl_exc or reflect_exc
                 _logger.warning(
                     "Skipped table '%s': could not generate DDL (%s: %s)",
                     table_name,
@@ -109,28 +148,35 @@ def profile_database(
                 if progress is not None:
                     progress(index, len(tables), table_name)
                 continue
+
             lines.extend(ddl)
             if lines[-1] != "":
                 lines.append("")
 
-            def report_column(column_name: str) -> None:
-                if progress is not None:
-                    progress(
-                        index - 1, len(tables), f"{table_name} ({column_name})"
+            if table is None:
+                lines.append(
+                    f"-- {table_name}: column profiling skipped "
+                    "(schema via utility fallback)"
+                )
+            else:
+                def report_column(column_name: str) -> None:
+                    if progress is not None:
+                        progress(
+                            index - 1, len(tables), f"{table_name} ({column_name})"
+                        )
+                try:
+                    table_prodile_strings = profile_table(
+                        conn, table, options, report_column=report_column
                     )
-            try:
-                table_prodile_strings = profile_table(conn, table, options, report_column=report_column)
-                lines.extend(
-                    table_prodile_strings
-                )
-            except Exception as exc:
-                _logger.warning(
-                    "Skipped table '%s': could not generate profile (%s: %s)",
-                    table_name,
-                    type(exc).__name__,
-                    exc,
-                )
-                failed_profile_tables.append(table_name)
+                    lines.extend(table_prodile_strings)
+                except Exception as exc:
+                    _logger.warning(
+                        "Skipped table '%s': could not generate profile (%s: %s)",
+                        table_name,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    failed_profile_tables.append(table_name)
             lines.append("")
             lines.append("")
             if progress is not None:
