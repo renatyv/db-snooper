@@ -19,13 +19,13 @@ def _bundled_skills_root() -> Path:
 
 
 def iter_bundled_skills() -> list[tuple[str, Path]]:
-    root = _bundled_skills_root()
-    skills: list[tuple[str, Path]] = []
-    for entry in sorted(root.iterdir()):
-        skill_md = entry / "SKILL.md"
-        if entry.is_dir() and skill_md.is_file():
-            skills.append((entry.name, skill_md))
-    return skills
+    skill_md = _bundled_skills_root() / "SKILL.md"
+    if not skill_md.is_file():
+        return []
+    name = parse_frontmatter(skill_md).get("name", "")
+    if not name:
+        return []
+    return [(name, skill_md)]
 
 
 def parse_frontmatter(skill_md: Path) -> dict[str, str]:

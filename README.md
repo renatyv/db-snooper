@@ -3,9 +3,11 @@
 [![PyPI](https://img.shields.io/pypi/v/db-snooper.svg)](https://pypi.org/project/db-snooper/)
 [![Python](https://img.shields.io/pypi/pyversions/db-snooper.svg)](https://pypi.org/project/db-snooper/)
 
-DB Snooper generates compact, LLM-ready database context for SQL generation, query debugging, and schema exploration. Profiling alone drives state-of-the-art text-to-SQL accuracy ([Automatic Metadata Extraction for Text-to-SQL](https://arxiv.org/abs/2505.19988)). Supports SQLite, PostgreSQL, MySQL, MariaDB, and DuckDB. Requires Python ≥ 3.10.
+**Agent skill: [`src/db_snooper/skills/SKILL.md`](src/db_snooper/skills/SKILL.md)**
 
-**Specification: [`spec/main.md`](spec/main.md)**
+**Spec: [`spec/main.md`](spec/main.md)**
+
+DB Snooper generates compact, LLM-ready database context for SQL generation, query debugging, and schema exploration. Profiling alone drives state-of-the-art text-to-SQL accuracy ([Automatic Metadata Extraction for Text-to-SQL](https://arxiv.org/abs/2505.19988)). Supports SQLite, PostgreSQL, MySQL, MariaDB, and DuckDB. Requires Python ≥ 3.10.
 
 It inspects an existing database and produces a SQL profile (`<database>/<schema>.sql`): DDL, row counts, sampled rows, and per-column summaries. Use `--per-table` for one `.sql` per table.
 
@@ -146,45 +148,20 @@ profile_sql = profile_database(
 )
 ```
 
-## Agent Skills
+## Agent Skill
 
-DB Snooper ships reusable [agent skills](https://opencode.ai/docs/skills/) that teach AI agents when and how to profile a database. Two skills are bundled:
+DB Snooper bundles [`db-snooper-profile`](src/db_snooper/skills/SKILL.md), an [agent skill](https://opencode.ai/docs/skills/) for generating schema and data context before writing or debugging SQL. It runs `db-snooper profile` and produces `<database>/<schema>.sql`.
 
-| Skill | Triggers on | Command | Output |
-|---|---|---|---|
-| `db-snooper-profile` | profiling, schema/data context, table summaries, column distributions | `db-snooper profile` | `<db>/<schema>.sql` |
-| `db-snooper-context` | general text-to-SQL context | `db-snooper profile` | `<db>/<schema>.sql` |
-
-Join-path discovery (declared PK/FK plus inferred candidates) now lives in the separate [`schema-linker`](https://github.com/renatyv) tool.
-
-List the bundled skills:
+The skill ships inside the wheel, so you can inspect or install it without cloning this repository:
 
 ```bash
 uvx db-snooper skills list
-```
-
-Install the skills into an agent's discovery directory (no repo clone needed; the `SKILL.md` files ship inside the wheel):
-
-```bash
-# Default: opencode global (~/.config/opencode/skills)
 uvx db-snooper skills install
-
-# All three common discovery locations at once (opencode + Claude + agents)
 uvx db-snooper skills install --target all
-
-# Custom or project-local directory
 uvx db-snooper skills install --dir ./.opencode/skills --force
 ```
 
-Discovery directories:
-
-- `--target opencode` → `~/.config/opencode/skills` (default)
-- `--target claude` → `~/.claude/skills`
-- `--target agents` → `~/.agents/skills`
-- `--target all` → all three
-- `--dir PATH` → any custom path (overrides `--target`)
-
-For zero per-user setup, commit the installed skill folders (for example `.opencode/skills/`) into your repository. Agents that walk the working directory discover them automatically.
+By default, installation targets `~/.config/opencode/skills`. Use `--target` for Claude or agents-compatible directories, or `--dir` for a custom location.
 
 ## License
 
