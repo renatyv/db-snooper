@@ -1,0 +1,14 @@
+{
+  "name": "db-snooper",
+  "displayName": "DB Snooper",
+  "description": "Generate compact database profiles for schema exploration, text-to-SQL, and query debugging.",
+  "author": {
+    "name": "Renat Iuldashev",
+    "email": "renatyv@gmail.com"
+  },
+  "homepage": "https://github.com/renatyv/db-snooper",
+  "repository": "https://github.com/renatyv/db-snooper",
+  "license": "MIT",
+  "keywords": ["database", "sql", "schema", "text-to-sql"],
+  "skills": "./src/db_snooper/skills"
+}

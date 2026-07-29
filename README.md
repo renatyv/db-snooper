@@ -152,6 +152,13 @@ profile_sql = profile_database(
 
 DB Snooper bundles [`db-snooper-profile`](src/db_snooper/skills/SKILL.md), an [agent skill](https://opencode.ai/docs/skills/) for generating schema and data context before writing or debugging SQL. It runs `db-snooper profile` and produces `<database>/<schema>.sql`.
 
+Install it as a Claude Code plugin:
+
+```text
+/plugin marketplace add renatyv/db-snooper
+/plugin install db-snooper@db-snooper
+```
+
 The skill ships inside the wheel, so you can inspect or install it without cloning this repository:
 
 ```bash

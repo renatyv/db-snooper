@@ -1,0 +1,15 @@
+{
+  "name": "db-snooper",
+  "owner": {
+    "name": "Renat Iuldashev",
+    "email": "renatyv@gmail.com",
+    "url": "https://github.com/renatyv"
+  },
+  "plugins": [
+    {
+      "name": "db-snooper",
+      "source": ".",
+      "description": "Generate compact database profiles for schema exploration, text-to-SQL, and query debugging."
+    }
+  ]
+}
