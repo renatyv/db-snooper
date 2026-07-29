@@ -8,6 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from sqlalchemy import create_engine
+from sqlalchemy.exc import SQLAlchemyError
 
 from db_snooper.connection import (
     add_connection_arguments,
@@ -129,13 +130,13 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
             f"profiling {item}" if current < total else f"profiled {item}",
         )
 
-    schemas = list_schemas(engine, options.schema)
     output_dir = (
         Path(args.output)
         if args.output
         else default_output_path(args.database or os.environ["DB_SNOOPER_DATABASE"])
     )
     try:
+        schemas = list_schemas(engine, options.schema)
         for schema in schemas:
             active_schema = schema
             schema_options = replace(options, schema=schema)
@@ -185,6 +186,11 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
                 (output_dir / f"{output_component(schema)}.sql").write_text(
                     output, encoding="utf-8"
                 )
+    except SQLAlchemyError as exc:
+        progress_bar.finish()
+        reason = str(getattr(exc, "orig", exc)).splitlines()[0]
+        print(f"Database error: {reason}", file=sys.stderr)
+        return 1
     except Exception:
         progress_bar.finish()
         raise
