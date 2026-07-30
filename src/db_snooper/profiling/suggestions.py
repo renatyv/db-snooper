@@ -47,7 +47,7 @@ def profile_suggestions(
             )
         else:
             action = (
-                f"Make catalog statistics readable ({names}) so large-table profiles "
+                f"Make database statistics readable ({names}) so large-table profiles "
                 "can include estimated nulls, distinct values, ranges, and top values."
             )
         _append_once(suggestions, seen, action)

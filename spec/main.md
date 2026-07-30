@@ -11,7 +11,7 @@ For each table:
 1. Generate `CREATE TABLE` DDL with all indexes and constraints.
 2. Generate a data profile.
    - Use query timouts to prevent hanging queries. If a query runs for 10s or more -> abort the query and skip this metric
-   - Use internal database stats to estimate number of rows. If its hundreds of millions or more -> use the internal stats to generate profile, don't run any queries. Instead, summarize each column from the engine's catalog statistics (PostgreSQL `pg_stats`, MySQL `COLUMN_STATISTICS` histograms, MariaDB `mysql.column_stats`): approximate null fraction, distinct count, numeric min/max, and top values. Mark these estimates with `≈` and a `(catalog)` tag so they are distinguishable from exact metrics.
+   - Use internal database stats to estimate number of rows. If its hundreds of millions or more -> use the internal stats to generate profile, don't run any queries. Instead, summarize each column from the engine's catalog statistics (PostgreSQL `pg_stats`, MySQL `COLUMN_STATISTICS` histograms, MariaDB `mysql.column_stats`): approximate null fraction, distinct count, numeric min/max, and top values. Mark these estimates with `≈` and a `(from db stats)` tag so they are distinguishable from exact metrics.
    - If a table has fewer than 50 rows, include rows up to a small deterministic cap. Never dump values for sensitive fields. Treat column names containing `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token` as sensitive, and redact sampled rows and value profiles.
    - If a table has more than 50 rows, include the number of rows, three latest rows, and five random rows. Also generate per-column profiles:
      - If a column is all `NULL`, emit a one-line `all NULL` summary.
@@ -66,15 +66,15 @@ CREATE TABLE `action_status_history` (
 -- total rows=551830
 -- action_history_id: nulls=0, non_nulls=551830, distinct=179744
 -- action_history_id numeric: min=362732, median=459736, max=542475
--- action_history_id top_values: 423373=4, 423378=4, 423383=4, 423384=4, 423386=4, 423387=4, 423388=4, 423391=4, 423392=4, 423395=4
+-- action_history_id top_values (value=count): 423373=4, 423378=4, 423383=4, 423384=4, 423386=4, 423387=4, 423388=4, 423391=4, 423392=4, 423395=4
 -- action_status: nulls=0, non_nulls=551830, distinct=5
--- action_status values: SCHEDULED=298848, DONE=165650, EXEC=73332, FAILED=12558, FAILED_TIMEOUT=1442
+-- action_status values (value=count): SCHEDULED=298848, DONE=165650, EXEC=73332, FAILED=12558, FAILED_TIMEOUT=1442
 -- id: unique values=551830, range=391982..943811
 -- state_history_id: nulls=98520, non_nulls=453310, distinct=453310
 -- state_history_id numeric: min=734084, median=960738, max=1187393
 -- tick: nulls=0, non_nulls=551830, distinct=12029
 -- tick numeric: min=1, median=854, max=15446
--- tick top_values: 1=4069, 2=1772, 3=1463, 10=1133, 4=861, 21=855, 20=852, 15=839, 5=837, 22=834
+-- tick top_values (value=count): 1=4069, 2=1772, 3=1463, 10=1133, 4=861, 21=855, 20=852, 15=839, 5=837, 22=834
 -- time: nulls=0, non_nulls=551830, distinct=551830
 
 

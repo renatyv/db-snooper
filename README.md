@@ -37,7 +37,7 @@ The profile `.sql` file contains:
 - Deterministic sampled rows for small tables.
 - Latest and random sampled rows for larger tables.
 - Per-column null, non-null, distinct, numeric range, median, top-value, and shape summaries for larger tables.
-- Catalog-derived estimates for very large tables (or metrics that are skipped on medium-large tables) from each engine's internal statistics — PostgreSQL `pg_stats`, MySQL `COLUMN_STATISTICS` histograms, and MariaDB `mysql.column_stats` — emitted with a `≈`/`(catalog)` marker so they are distinguishable from exact values.
+- Catalog-derived estimates for very large tables (or metrics that are skipped on medium-large tables) from each engine's internal statistics — PostgreSQL `pg_stats`, MySQL `COLUMN_STATISTICS` histograms, and MariaDB `mysql.column_stats` — emitted with a `≈`/`(from db stats)` marker so they are distinguishable from exact values.
 - Top-level key frequencies for JSON/JSONB columns and min/avg/max element counts for ARRAY columns (when row counts allow).
 - Redacted values for sensitive column names containing `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token`.
 - A `-- skipped technical tables:` line naming migration/framework tables excluded from the profile.
@@ -115,7 +115,7 @@ DB_SNOOPER_SCHEMA=reporting db-snooper profile --db-type postgres --database app
 Profile options:
 
 - `--small-table-threshold 50`: tables with this many rows or fewer are sampled instead of column-profiled.
-- `--large-table-threshold 100000000`: tables whose catalog row estimate is at/above this count are profiled from internal database stats only. `COUNT(*)`, sampled rows, and per-column queries are skipped because they would be too slow on hundreds of millions of rows. Instead, each column is summarized from the engine's catalog statistics (approximate null fraction, distinct count, numeric min/max, and top values), marked with `≈`/`(catalog)`.
+- `--large-table-threshold 100000000`: tables whose catalog row estimate is at/above this count are profiled from internal database stats only. `COUNT(*)`, sampled rows, and per-column queries are skipped because they would be too slow on hundreds of millions of rows. Instead, each column is summarized from the engine's catalog statistics (approximate null fraction, distinct count, numeric min/max, and top values), marked with `≈`/`(from db stats)`.
 - `--sample-row-limit 50`: maximum sampled rows for small tables.
 - `--include-tables table_a,table_b`: only profile selected tables.
 - `--exclude-tables table_c`: skip selected tables.

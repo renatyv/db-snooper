@@ -79,7 +79,7 @@ def profile_table_from_stats(
     # per-column summary derived entirely from those stats.
     lines = [
         f"-- total rows≈{estimate} "
-        "(estimated from catalog stats; row/column profiling skipped)"
+        "(estimated from db stats; row/column profiling skipped)"
     ]
     catalog = get_catalog_column_stats(conn, table, estimate)
     for column in table.columns:
@@ -99,21 +99,21 @@ def _catalog_column_lines(column: Any, stat: Any, estimate: int) -> list[str]:
         parts.append(f"distinct≈{stat.distinct}")
     lines: list[str] = []
     if parts:
-        lines.append(f"-- {column.name} (catalog): {', '.join(parts)}")
+        lines.append(f"-- {column.name} (from db stats): {', '.join(parts)}")
     if (
         is_numeric(column)
         and stat.min_value is not None
         and stat.max_value is not None
     ):
         lines.append(
-            f"-- {column.name} numeric (catalog): "
+            f"-- {column.name} numeric (from db stats): "
             f"min≈{format_value(stat.min_value)}, max≈{format_value(stat.max_value)}"
         )
     # Top values can expose real column values, so suppress them for sensitive
     # columns (mirrors the exact profiling path).
     if stat.top_values and not is_sensitive(column.name):
         lines.append(
-            f"-- {column.name} top_values (catalog): "
+            f"-- {column.name} top_values (from db stats, value=count): "
             f"{format_value_counts(list(stat.top_values))}"
         )
     return lines
@@ -136,10 +136,12 @@ def profile_table(
         return [f"-- {table.name}: skipped (row count query timeout)"]
     lines = [f"-- total rows={total_rows}"]
     if total_rows <= options.small_table_threshold:
-        marker = (
-            "ALL_ROWS" if total_rows <= options.sample_row_limit else "SAMPLED_ROWS"
+        marker, descriptor = (
+            ("ALL_ROWS", "all rows listed below")
+            if total_rows <= options.sample_row_limit
+            else ("SAMPLED_ROWS", f"first {options.sample_row_limit} rows listed below")
         )
-        lines.append(f"-- {marker}: {table.name}")
+        lines.append(f"-- {marker}: {table.name} ({descriptor})")
         sampled: list[dict[str, Any]] = []
         with query_timeout.metric(conn, [], "sampled rows"):
             sampled = sample_rows(conn, table, options.sample_row_limit)
@@ -147,14 +149,14 @@ def profile_table(
             lines.append(f"-- row: {json_dumps(row)}")
         return lines
 
-    lines.append(f"-- LATEST_ROWS: {table.name}")
+    lines.append(f"-- LATEST_ROWS: {table.name} (most recent rows listed below)")
     latest: list[dict[str, Any]] = []
     with query_timeout.metric(conn, [], "latest rows"):
         latest = latest_rows(conn, table, 3)
     for row in latest:
         lines.append(f"-- row: {json_dumps(row)}")
 
-    lines.append(f"-- RANDOM_ROWS: {table.name}")
+    lines.append(f"-- RANDOM_ROWS: {table.name} (random sample listed below)")
     random_sample: list[dict[str, Any]] = []
     with query_timeout.metric(conn, [], "random rows"):
         random_sample = random_rows(conn, table, 5)

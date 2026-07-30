@@ -157,14 +157,14 @@ def profile_column(
             with query_timeout.metric(conn, skipped, "value counts"):
                 top_values = get_value_counts(conn, table, column, limit=None)
                 lines.append(
-                    f"-- {column.name} values: {format_value_counts(top_values)}"
+                    f"-- {column.name} values (value=count): {format_value_counts(top_values)}"
                 )
         elif total_rows <= 100_000 and indexed:
             with query_timeout.metric(conn, skipped, "top values"):
                 top_values = get_value_counts(conn, table, column, limit=10)
                 if top_values and top_values[0][1] > 1:
                     lines.append(
-                        f"-- {column.name} top_values: {format_value_counts(top_values)}"
+                        f"-- {column.name} top_values (value=count): {format_value_counts(top_values)}"
                     )
         elif total_rows > 100_000 and indexed:
             top_values = (
@@ -172,12 +172,14 @@ def profile_column(
             )
             if top_values:
                 lines.append(
-                    f"-- {column.name} top_values (catalog): "
+                    f"-- {column.name} top_values (from db stats, value=count): "
                     f"{format_value_counts(top_values)}"
                 )
         shape_summary = get_shape_summary(column, distinct_count, top_values)
         if shape_summary:
-            lines.append(f"-- {column.name} shape: {shape_summary}")
+            lines.append(
+                f"-- {column.name} value_shapes (shape=count): {shape_summary}"
+            )
 
     # Type-specific profiling for container/LOB types that cannot be DISTINCTed.
     if not sensitive and not unique_identifier:
@@ -391,7 +393,7 @@ def profile_json_column(
         return None
     ordered = sorted(key_counts.items(), key=lambda item: (-item[1], item[0]))
     pairs = ", ".join(f"{key}={count}" for key, count in ordered)
-    return f"-- {column.name} json_keys: {pairs}"
+    return f"-- {column.name} json_keys (key=count): {pairs}"
 
 
 def profile_array_column(
