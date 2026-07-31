@@ -100,11 +100,7 @@ def _catalog_column_lines(column: Any, stat: Any, estimate: int) -> list[str]:
     lines: list[str] = []
     if parts:
         lines.append(f"-- {column.name} (from db stats): {', '.join(parts)}")
-    if (
-        is_numeric(column)
-        and stat.min_value is not None
-        and stat.max_value is not None
-    ):
+    if is_numeric(column) and stat.min_value is not None and stat.max_value is not None:
         lines.append(
             f"-- {column.name} numeric (from db stats): "
             f"min≈{format_value(stat.min_value)}, max≈{format_value(stat.max_value)}"

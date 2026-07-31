@@ -144,7 +144,9 @@ engine = create_engine("sqlite:///eval-dataset/superhero/superhero.sqlite")
 
 profile_sql = profile_database(
     engine,
-    ProfileOptions(sample_row_limit=25, include_tables=frozenset({"superhero", "publisher"})),
+    ProfileOptions(
+        sample_row_limit=25, include_tables=frozenset({"superhero", "publisher"})
+    ),
 )
 ```
 

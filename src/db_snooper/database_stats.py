@@ -222,9 +222,7 @@ def _mysql_column_stats(
     return stats
 
 
-def mysql_histogram_summary(
-    histogram: Any, estimate: int | None
-) -> ColumnStat | None:
+def mysql_histogram_summary(histogram: Any, estimate: int | None) -> ColumnStat | None:
     """Parse a MySQL ``COLUMN_STATISTICS`` histogram JSON into a ColumnStat.
 
     Handles both histogram types:
@@ -366,7 +364,10 @@ def _mariadb_top_values(
     return tuple(
         sorted(
             (
-                (_decode_catalog_value(value), max(1, round(frequency * non_null_count)))
+                (
+                    _decode_catalog_value(value),
+                    max(1, round(frequency * non_null_count)),
+                )
                 for value, frequency in counts
             ),
             key=lambda item: (-item[1], str(item[0])),

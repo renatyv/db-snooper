@@ -126,9 +126,7 @@ def profile_database(
                     )
                     ddl = None
                 if ddl is not None:
-                    lines.append(
-                        f"-- {table_name}: CREATE TABLE via utility fallback"
-                    )
+                    lines.append(f"-- {table_name}: CREATE TABLE via utility fallback")
 
             if ddl is None:
                 exc = ddl_exc or reflect_exc
@@ -159,11 +157,13 @@ def profile_database(
                     "(schema via utility fallback)"
                 )
             else:
+
                 def report_column(column_name: str) -> None:
                     if progress is not None:
                         progress(
                             index - 1, len(tables), f"{table_name} ({column_name})"
                         )
+
                 try:
                     table_prodile_strings = profile_table(
                         conn, table, options, report_column=report_column
