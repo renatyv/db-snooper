@@ -41,6 +41,8 @@ The profile `.sql` file contains:
 - Top-level key frequencies for JSON/JSONB columns and min/avg/max element counts for ARRAY columns (when row counts allow).
 - Redacted values for sensitive column names containing `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token`.
 - A `-- skipped technical tables:` line naming migration/framework tables excluded from the profile.
+- Empty tables are skipped by default (no DDL, no rows). A `-- Skipped N empty table(s):` line names them; use `--include-empty-tables` to emit their `CREATE TABLE`.
+- For small tables whose rows are all listed, the `CREATE TABLE` is omitted — the row data already exposes columns, types, and constraints.
 
 ## Database Examples
 
@@ -120,6 +122,7 @@ Profile options:
 - `--include-tables table_a,table_b`: only profile selected tables.
 - `--exclude-tables table_c`: skip selected tables.
 - `--include-technical-tables`: profile migration/framework tables (e.g. `schema_migrations`, `alembic_version`, `flyway_schema_history`, `django_migrations`) that are skipped by default.
+- `--include-empty-tables`: emit the `CREATE TABLE` for tables with zero rows. By default empty tables are skipped entirely.
 - `--per-table`: generate one `.sql` profile for each table instead of a single schema profile.
 
 ## Python API

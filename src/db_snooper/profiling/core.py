@@ -9,7 +9,11 @@ from sqlalchemy.engine import Engine
 from db_snooper import __version__, query_timeout
 from db_snooper.permissions import PermissionReport, check_permissions, format_warnings
 from db_snooper.profiling.models import ProfileOptions, ProfileProgress
-from db_snooper.profiling.tables import get_table_ddl, profile_table
+from db_snooper.profiling.tables import (
+    get_table_ddl,
+    profile_table,
+    resolve_table_size,
+)
 from db_snooper.profiling.utility_dump import dump_create_table
 from db_snooper.shared import is_technical_table
 
@@ -85,6 +89,7 @@ def profile_database(
         metadata = MetaData()
         failed_ddl_tables: list[str] = []
         failed_profile_tables: list[str] = []
+        skipped_empty_tables: list[str] = []
         for index, table_name in enumerate(tables, start=1):
             if progress is not None:
                 progress(index - 1, len(tables), table_name)
@@ -98,58 +103,83 @@ def profile_database(
             except Exception as exc:
                 reflect_exc = exc
 
-            ddl: list[str] | None = None
-            ddl_exc: Exception | None = None
-            if not options.use_dump_ddl and table is not None:
-                try:
-                    ddl = get_table_ddl(conn, table)
-                except Exception as exc:
-                    ddl_exc = exc
-
-            if ddl is None:
-                reason = (
-                    "forced (--use-dump-ddl)"
-                    if options.use_dump_ddl
-                    else f"SQLAlchemy DDL failed ({type((ddl_exc or reflect_exc)).__name__})"
-                )
-                _logger.info("Utility fallback for '%s': %s", table_name, reason)
-                fallback_schema = (
-                    table.schema if table is not None else None
-                ) or options.schema
-                try:
-                    ddl = dump_create_table(
-                        engine.url, engine.dialect.name, table_name, fallback_schema
-                    )
-                except Exception as exc:
-                    _logger.warning(
-                        "utility fallback errored for '%s': %r", table_name, exc
-                    )
-                    ddl = None
-                if ddl is not None:
-                    lines.append(f"-- {table_name}: CREATE TABLE via utility fallback")
-
-            if ddl is None:
-                exc = ddl_exc or reflect_exc
-                _logger.warning(
-                    "Skipped table '%s': could not generate DDL (%s: %s)",
-                    table_name,
-                    type(exc).__name__,
-                    exc,
-                )
-                failed_ddl_tables.append(table_name)
-                lines.append(
-                    f"-- {table_name}: skipped (DDL generation failed: "
-                    f"{type(exc).__name__}: {exc})"
-                )
-                lines.append("")
-                lines.append("")
+            # Resolve row count once (needs a reflected table) so the DDL and
+            # profiling decisions below share it. Empty tables are skipped
+            # entirely unless --include-empty-tables is set.
+            size_info = (
+                resolve_table_size(conn, table, options) if table is not None else None
+            )
+            if (
+                size_info is not None
+                and size_info.is_empty
+                and not options.include_empty_tables
+            ):
+                skipped_empty_tables.append(table_name)
                 if progress is not None:
                     progress(index, len(tables), table_name)
                 continue
 
-            lines.extend(ddl)
-            if lines[-1] != "":
-                lines.append("")
+            # When every row is listed below, the CREATE TABLE is redundant: the
+            # row data already exposes columns, types, and constraints.
+            skip_create_table = size_info is not None and size_info.all_rows_listed(
+                options
+            )
+
+            ddl: list[str] | None = None
+            ddl_exc: Exception | None = None
+            if not skip_create_table:
+                if not options.use_dump_ddl and table is not None:
+                    try:
+                        ddl = get_table_ddl(conn, table)
+                    except Exception as exc:
+                        ddl_exc = exc
+
+                if ddl is None:
+                    reason = (
+                        "forced (--use-dump-ddl)"
+                        if options.use_dump_ddl
+                        else f"SQLAlchemy DDL failed ({type((ddl_exc or reflect_exc)).__name__})"
+                    )
+                    _logger.info("Utility fallback for '%s': %s", table_name, reason)
+                    fallback_schema = (
+                        table.schema if table is not None else None
+                    ) or options.schema
+                    try:
+                        ddl = dump_create_table(
+                            engine.url, engine.dialect.name, table_name, fallback_schema
+                        )
+                    except Exception as exc:
+                        _logger.warning(
+                            "utility fallback errored for '%s': %r", table_name, exc
+                        )
+                        ddl = None
+                    if ddl is not None:
+                        lines.append(
+                            f"-- {table_name}: CREATE TABLE via utility fallback"
+                        )
+
+                if ddl is None:
+                    exc = ddl_exc or reflect_exc
+                    _logger.warning(
+                        "Skipped table '%s': could not generate DDL (%s: %s)",
+                        table_name,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    failed_ddl_tables.append(table_name)
+                    lines.append(
+                        f"-- {table_name}: skipped (DDL generation failed: "
+                        f"{type(exc).__name__}: {exc})"
+                    )
+                    lines.append("")
+                    lines.append("")
+                    if progress is not None:
+                        progress(index, len(tables), table_name)
+                    continue
+
+                lines.extend(ddl)
+                if lines[-1] != "":
+                    lines.append("")
 
             if table is None:
                 lines.append(
@@ -166,7 +196,11 @@ def profile_database(
 
                 try:
                     table_prodile_strings = profile_table(
-                        conn, table, options, report_column=report_column
+                        conn,
+                        table,
+                        options,
+                        report_column=report_column,
+                        size_info=size_info,
                     )
                     lines.extend(table_prodile_strings)
                 except Exception as exc:
@@ -197,6 +231,14 @@ def profile_database(
             f"errors: {', '.join(failed_profile_tables)}"
         )
         _logger.warning(summary)
+        lines.append(f"-- {summary}")
+        lines.append("")
+
+    if skipped_empty_tables:
+        summary = f"Skipped {len(skipped_empty_tables)} empty table(s): " + ", ".join(
+            sorted(skipped_empty_tables)
+        )
+        _logger.info(summary)
         lines.append(f"-- {summary}")
         lines.append("")
 

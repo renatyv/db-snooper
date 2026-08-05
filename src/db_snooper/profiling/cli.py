@@ -82,6 +82,14 @@ def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--include-empty-tables",
+        action="store_true",
+        help=(
+            "Profile tables with zero rows (emitting their CREATE TABLE). "
+            "By default empty tables are skipped entirely."
+        ),
+    )
+    parser.add_argument(
         "--use-dump-ddl",
         action="store_true",
         help=(
@@ -111,6 +119,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         exclude_tables=parse_table_set(args.exclude_tables) or frozenset(),
         schema=resolve_schema(args),
         include_technical_tables=args.include_technical_tables,
+        include_empty_tables=args.include_empty_tables,
         use_dump_ddl=args.use_dump_ddl,
     )
     engine = create_engine(url)

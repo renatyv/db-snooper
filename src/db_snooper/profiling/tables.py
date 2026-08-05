@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import Table, desc, func, select, text
@@ -72,6 +73,62 @@ def get_reflected_ddl(conn: Connection, table: Table) -> list[str]:
     return lines
 
 
+@dataclass
+class TableSizeInfo:
+    """Resolved row-count information for a table.
+
+    ``total_rows`` is an exact ``COUNT(*)`` when available; it is ``None`` for
+    catalog-profiled large tables (where the count query is skipped) and for
+    timed-out count queries.
+    """
+
+    total_rows: int | None
+    estimate: int | None
+    is_large: bool
+    timed_out: bool
+
+    @property
+    def is_empty(self) -> bool:
+        return self.total_rows == 0
+
+    def all_rows_listed(self, options: ProfileOptions) -> bool:
+        """True when the table is small enough that every row is dumped.
+
+        Empty tables return False: with no rows dumped, nothing reveals the
+        schema, so the CREATE TABLE is still required (when the table is
+        included at all).
+        """
+        if self.total_rows is None or self.is_large or self.timed_out:
+            return False
+        if self.total_rows == 0:
+            return False
+        return self.total_rows <= min(
+            options.small_table_threshold, options.sample_row_limit
+        )
+
+
+def resolve_table_size(
+    conn: Connection, table: Table, options: ProfileOptions
+) -> TableSizeInfo:
+    """Determine a table's row count once so DDL and profiling decisions share it."""
+    estimate = estimate_row_count(conn, table)
+    if estimate is not None and estimate >= options.large_table_threshold:
+        return TableSizeInfo(
+            total_rows=None, estimate=estimate, is_large=True, timed_out=False
+        )
+    try:
+        total_rows = query_timeout.execute(
+            conn, select(func.count()).select_from(table)
+        ).scalar_one()
+    except query_timeout.QueryTimeout:
+        return TableSizeInfo(
+            total_rows=None, estimate=estimate, is_large=False, timed_out=True
+        )
+    return TableSizeInfo(
+        total_rows=total_rows, estimate=estimate, is_large=False, timed_out=False
+    )
+
+
 def profile_table_from_stats(
     conn: Connection, table: Table, estimate: int
 ) -> list[str]:
@@ -120,16 +177,18 @@ def profile_table(
     table: Table,
     options: ProfileOptions,
     report_column: Callable[[str], None] | None = None,
+    size_info: TableSizeInfo | None = None,
 ) -> list[str]:
-    estimate = estimate_row_count(conn, table)
-    if estimate is not None and estimate >= options.large_table_threshold:
-        return profile_table_from_stats(conn, table, estimate)
-    try:
-        total_rows = query_timeout.execute(
-            conn, select(func.count()).select_from(table)
-        ).scalar_one()
-    except query_timeout.QueryTimeout:
+    if size_info is None:
+        size_info = resolve_table_size(conn, table, options)
+    if size_info.is_large:
+        return profile_table_from_stats(conn, table, size_info.estimate)
+    if size_info.timed_out:
         return [f"-- {table.name}: skipped (row count query timeout)"]
+    total_rows = size_info.total_rows
+    if total_rows is None:
+        # Unreachable: is_large/timed_out return early above.
+        return [f"-- {table.name}: skipped (row count unavailable)"]
     lines = [f"-- total rows={total_rows}"]
     if total_rows <= options.small_table_threshold:
         marker, descriptor = (

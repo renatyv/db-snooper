@@ -1,6 +1,6 @@
 ---
 name: db-snooper-profile
-description: Use when an AI agent needs to generate a database schema and data profile (.sql: DDL, row counts, sampled rows, per-column summaries) for text-to-SQL, query planning, schema understanding, or data exploration with db-snooper.
+description: "Use when an AI agent needs to generate a database schema and data profile (.sql: DDL, row counts, sampled rows, per-column summaries) for text-to-SQL, query planning, schema understanding, or data exploration with db-snooper."
 compatibility: opencode, OpenWork, PI, Claude, ChatGPT, custom agent runners
 ---
 
