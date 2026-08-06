@@ -61,9 +61,7 @@ def profile_column(
             nulls = total_rows - non_nulls
             if non_nulls == 0:
                 lines = [f"-- {column.name}: all NULL"]
-                lines.extend(
-                    _skipped_metric_lines(column.name, skipped, timeout_seconds)
-                )
+                lines.extend(_skipped_metric_lines(skipped, timeout_seconds))
                 return lines
 
     distinct_supported = is_distinct_supported(column)
@@ -149,7 +147,7 @@ def profile_column(
                     median = median_value(conn, table, column)
                     numeric.append(f"median={format_value(median)}")
         if numeric:
-            lines.append(f"-- {column.name} numeric: {', '.join(numeric)}")
+            lines.append(continuation_line("numeric", ", ".join(numeric)))
 
     if not sensitive and not unique_identifier and distinct_supported:
         top_values: list[tuple[Any, int]] = []
@@ -157,14 +155,16 @@ def profile_column(
             with query_timeout.metric(conn, skipped, "value counts"):
                 top_values = get_value_counts(conn, table, column, limit=None)
                 lines.append(
-                    f"-- {column.name} values (value=count): {format_value_counts(top_values)}"
+                    continuation_line("values", format_value_counts(top_values))
                 )
         elif total_rows <= 100_000 and indexed:
             with query_timeout.metric(conn, skipped, "top values"):
                 top_values = get_value_counts(conn, table, column, limit=10)
                 if top_values and top_values[0][1] > 1:
                     lines.append(
-                        f"-- {column.name} top_values (value=count): {format_value_counts(top_values)}"
+                        continuation_line(
+                            "top_values", format_value_counts(top_values)
+                        )
                     )
         elif total_rows > 100_000 and indexed:
             top_values = (
@@ -172,14 +172,13 @@ def profile_column(
             )
             if top_values:
                 lines.append(
-                    f"-- {column.name} top_values (from db stats, value=count): "
-                    f"{format_value_counts(top_values)}"
+                    continuation_line(
+                        "top_values", format_value_counts(top_values)
+                    )
                 )
-        shape_summary = get_shape_summary(column, distinct_count, top_values)
-        if shape_summary:
-            lines.append(
-                f"-- {column.name} value_shapes (shape=count): {shape_summary}"
-            )
+        shape_tag = dominant_shape(column, distinct_count, top_values)
+        if shape_tag:
+            lines[0] += f", shape={shape_tag}"
 
     # Type-specific profiling for container/LOB types that cannot be DISTINCTed.
     if not sensitive and not unique_identifier:
@@ -192,17 +191,17 @@ def profile_column(
             if array_line:
                 lines.append(array_line)
 
-    lines.extend(_skipped_metric_lines(column.name, skipped, timeout_seconds))
+    lines.extend(_skipped_metric_lines(skipped, timeout_seconds))
     return lines
 
 
 def _skipped_metric_lines(
-    column_name: str, skipped: list[str], timeout_seconds: int
+    skipped: list[str], timeout_seconds: int
 ) -> list[str]:
     if not skipped or timeout_seconds <= 0:
         return []
     return [
-        f"-- {column_name} {metric}: skipped (query timeout > {timeout_seconds}s)"
+        continuation_line(metric, f"skipped (query timeout > {timeout_seconds}s)")
         for metric in skipped
     ]
 
@@ -284,33 +283,38 @@ def get_unique_column_names(table: Table) -> set[str]:
     return unique_columns
 
 
-def get_shape_summary(
+def dominant_shape(
     column: Any,
     distinct_count: int | None,
     top_values: list[tuple[Any, int]],
 ) -> str | None:
-    if (
-        not isinstance(column.type, (String, Text))
-        or distinct_count is None
-        or distinct_count <= 1
-    ):
+    """Return a single shape label when most sampled values share one.
+
+    This is only meaningful when the actual values are *not* already listed:
+    when every value is shown on a ``values:`` line a shape tag just repeats the
+    obvious, so it is suppressed for low-cardinality columns. Returns ``None``
+    for non-string columns and when no single shape dominates the sample.
+    """
+    if not isinstance(column.type, (String, Text)):
+        return None
+    if distinct_count is not None and distinct_count < 20:
+        # All values are already enumerated above; nothing to add.
         return None
     values = [value for value, _count in top_values[:10] if isinstance(value, str)]
-    if not values:
+    if len(values) < 2:
         return None
     shapes: dict[str, int] = {}
     for value in values:
         shape = value_shape(value)
-        if shape and shape != "text":
+        if shape and shape not in ("text", "empty"):
             shapes[shape] = shapes.get(shape, 0) + 1
     if not shapes:
         return None
-    return ", ".join(
-        f"{shape}={count}"
-        for shape, count in sorted(
-            shapes.items(), key=lambda item: (-item[1], item[0])
-        )[:5]
-    )
+    classified = sum(shapes.values())
+    shape, count = max(shapes.items(), key=lambda item: item[1])
+    if count >= 2 and count >= 0.6 * classified:
+        return shape
+    return None
 
 
 def value_shape(value: str) -> str | None:
@@ -323,6 +327,9 @@ def value_shape(value: str) -> str | None:
     if re.fullmatch(r"\+?[\d .()/-]{7,}", value):
         return "phone"
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}.*", value):
+        return "date-like"
+    # Oracle-style dates, e.g. DD-MON-YY / DD-MON-YYYY ("17-MAY-23").
+    if re.fullmatch(r"\d{1,2}-[A-Z]{3}-\d{2,4}.*", value):
         return "date-like"
     if re.search(r"\d", value) and re.search(r"[A-Za-z]", value):
         return "letters+digits"
@@ -393,7 +400,7 @@ def profile_json_column(
         return None
     ordered = sorted(key_counts.items(), key=lambda item: (-item[1], item[0]))
     pairs = ", ".join(f"{key}={count}" for key, count in ordered)
-    return f"-- {column.name} json_keys (key=count): {pairs}"
+    return continuation_line("json_keys", pairs)
 
 
 def profile_array_column(
@@ -435,7 +442,7 @@ def profile_array_column(
         parts.append(f"avg_len={format_value(avg_len)}")
     if max_len is not None:
         parts.append(f"max_len={format_value(max_len)}")
-    return f"-- {column.name} array: {', '.join(parts)}" if parts else None
+    return continuation_line("array", ", ".join(parts)) if parts else None
 
 
 def _json_value_in_bounds(value: Any) -> bool:
@@ -469,6 +476,16 @@ def is_identifier_name(column_name: str) -> bool:
 
 def format_value_counts(values: list[tuple[Any, int]]) -> str:
     return ", ".join(f"{format_value(value)}={count}" for value, count in values)
+
+
+def continuation_line(label: str, body: str) -> str:
+    """A metric line that belongs to the column header above it.
+
+    Continuation lines omit the repeated column name and the ``value=count``
+    annotation: the header line (the first ``-- col:`` line) already names the
+    column, and the ``label`` makes the metric self-describing.
+    """
+    return f"--   {label}: {body}"
 
 
 def format_value(value: Any) -> str:

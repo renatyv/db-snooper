@@ -17,7 +17,8 @@ For each table:
    - If a table has more than 50 rows, include the number of rows, three latest rows, and five random rows. Also generate per-column profiles:
      - If a column is all `NULL`, emit a one-line `all NULL` summary.
      - If a column is a unique identifier, omit top values and value-shape metadata.
-     - If a column has fewer than 20 distinct values, include all non-sensitive values.
+     - If a column has fewer than 20 distinct values, include all non-sensitive values; when every value is already listed, no value-shape tag is emitted (it would just repeat the obvious).
+     - For high-cardinality string columns whose individual values are not all listed, append a single `shape=<shape>` tag to the column summary when one shape (e.g. `email`, `phone`, `date-like`, `UPPER+digits`) dominates the sampled top values; otherwise omit it.
      - If n_rows >= 20, include per-column profile data:
        - `NULL` and non-`NULL` counts. If n_rows > 5M, then compute it only if column is indexed
        - Min, max for numeric columns. If n_rows > 5M, then compute it only if column is indexed
@@ -68,16 +69,16 @@ CREATE TABLE `action_status_history` (
 
 -- total rows=551830
 -- action_history_id: nulls=0, non_nulls=551830, distinct=179744
--- action_history_id numeric: min=362732, median=459736, max=542475
--- action_history_id top_values (value=count): 423373=4, 423378=4, 423383=4, 423384=4, 423386=4, 423387=4, 423388=4, 423391=4, 423392=4, 423395=4
+--   numeric: min=362732, median=459736, max=542475
+--   top_values: 423373=4, 423378=4, 423383=4, 423384=4, 423386=4, 423387=4, 423388=4, 423391=4, 423392=4, 423395=4
 -- action_status: nulls=0, non_nulls=551830, distinct=5
--- action_status values (value=count): SCHEDULED=298848, DONE=165650, EXEC=73332, FAILED=12558, FAILED_TIMEOUT=1442
+--   values: SCHEDULED=298848, DONE=165650, EXEC=73332, FAILED=12558, FAILED_TIMEOUT=1442
 -- id: unique values=551830, range=391982..943811
 -- state_history_id: nulls=98520, non_nulls=453310, distinct=453310
--- state_history_id numeric: min=734084, median=960738, max=1187393
+--   numeric: min=734084, median=960738, max=1187393
 -- tick: nulls=0, non_nulls=551830, distinct=12029
--- tick numeric: min=1, median=854, max=15446
--- tick top_values (value=count): 1=4069, 2=1772, 3=1463, 10=1133, 4=861, 21=855, 20=852, 15=839, 5=837, 22=834
+--   numeric: min=1, median=854, max=15446
+--   top_values: 1=4069, 2=1772, 3=1463, 10=1133, 4=861, 21=855, 20=852, 15=839, 5=837, 22=834
 -- time: nulls=0, non_nulls=551830, distinct=551830
 
 

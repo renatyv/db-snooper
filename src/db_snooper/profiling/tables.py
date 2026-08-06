@@ -16,6 +16,7 @@ from db_snooper.database_stats import (
 )
 from db_snooper.profiling.columns import (
     JSON_MAX_VALUE_BYTES,
+    continuation_line,
     format_value,
     format_value_counts,
     get_unique_column_names,
@@ -154,20 +155,34 @@ def _catalog_column_lines(column: Any, stat: Any, estimate: int) -> list[str]:
         parts.extend((f"nulls≈{nulls}", f"non_nulls≈{estimate - nulls}"))
     if stat.distinct is not None:
         parts.append(f"distinct≈{stat.distinct}")
-    lines: list[str] = []
-    if parts:
-        lines.append(f"-- {column.name} (from db stats): {', '.join(parts)}")
-    if is_numeric(column) and stat.min_value is not None and stat.max_value is not None:
-        lines.append(
-            f"-- {column.name} numeric (from db stats): "
-            f"min≈{format_value(stat.min_value)}, max≈{format_value(stat.max_value)}"
-        )
+    has_numeric = (
+        is_numeric(column)
+        and stat.min_value is not None
+        and stat.max_value is not None
+    )
     # Top values can expose real column values, so suppress them for sensitive
     # columns (mirrors the exact profiling path).
-    if stat.top_values and not is_sensitive(column.name):
+    has_top_values = bool(stat.top_values) and not is_sensitive(column.name)
+    lines: list[str] = []
+    if parts or has_numeric or has_top_values:
+        # Emit a header so the continuation lines below are never orphaned,
+        # even when null/distinct stats are absent but min/max or top_values
+        # are available.
         lines.append(
-            f"-- {column.name} top_values (from db stats, value=count): "
-            f"{format_value_counts(list(stat.top_values))}"
+            f"-- {column.name} (from db stats): {', '.join(parts)}"
+            if parts
+            else f"-- {column.name} (from db stats):"
+        )
+    if has_numeric:
+        lines.append(
+            continuation_line(
+                "numeric",
+                f"min≈{format_value(stat.min_value)}, max≈{format_value(stat.max_value)}",
+            )
+        )
+    if has_top_values:
+        lines.append(
+            continuation_line("top_values", format_value_counts(list(stat.top_values)))
         )
     return lines
 
