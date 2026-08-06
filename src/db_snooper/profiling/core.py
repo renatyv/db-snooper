@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import MetaData, Table, inspect
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 
 from db_snooper import __version__, query_timeout
 from db_snooper.permissions import PermissionReport, check_permissions, format_warnings
 from db_snooper.profiling.models import ProfileOptions, ProfileProgress
 from db_snooper.profiling.tables import (
+    OBJECT_MATERIALIZED_VIEW,
+    OBJECT_TABLE,
+    OBJECT_VIEW,
     TableDdl,
     get_table_ddl,
     profile_table,
@@ -23,25 +28,79 @@ _logger = logging.getLogger("db_snooper")
 
 def list_schema_tables(
     engine: Engine, options: ProfileOptions
-) -> tuple[list[str], list[str]]:
-    """Return ``(tables, skipped_technical)`` for the schema.
+) -> tuple[list[str], list[str], dict[str, str]]:
+    """Return ``(objects, skipped_technical, kinds)`` for the schema.
+
+    ``objects`` includes base tables, views, and materialized views (sorted).
+    ``kinds`` maps each name to a kind constant from
+    :mod:`db_snooper.profiling.tables` (``OBJECT_TABLE`` / ``OBJECT_VIEW`` /
+    ``OBJECT_MATERIALIZED_VIEW``) so DDL generation emits the right statement.
 
     Migration/DB-internal tables are excluded by default unless
     ``options.include_technical_tables`` is set; the excluded names are returned
     so the profile can record which tables were skipped.
     """
     inspector = inspect(engine)
-    all_tables = sorted(inspector.get_table_names(schema=options.schema))
+    base_tables = sorted(inspector.get_table_names(schema=options.schema))
+    kinds: dict[str, str] = {name: OBJECT_TABLE for name in base_tables}
+    # A name cannot be both a table and a view in one schema; ``setdefault``
+    # keeps tables authoritative in the unlikely event of a collision.
+    for name, kind in _list_views(
+        inspector, engine.dialect.name, options.schema
+    ).items():
+        kinds.setdefault(name, kind)
+
+    all_objects = sorted(kinds)
     if not options.include_technical_tables:
-        skipped_technical = [t for t in all_tables if is_technical_table(t)]
-        tables = [t for t in all_tables if not is_technical_table(t)]
+        skipped_technical = [t for t in all_objects if is_technical_table(t)]
+        objects = [t for t in all_objects if not is_technical_table(t)]
     else:
         skipped_technical = []
-        tables = list(all_tables)
+        objects = list(all_objects)
     if options.include_tables is not None:
-        tables = [table for table in tables if table in options.include_tables]
-    tables = [table for table in tables if table not in options.exclude_tables]
-    return tables, skipped_technical
+        objects = [obj for obj in objects if obj in options.include_tables]
+    objects = [obj for obj in objects if obj not in options.exclude_tables]
+    return objects, skipped_technical, kinds
+
+
+def _list_views(
+    inspector: Any, dialect: str, schema: str | None
+) -> dict[str, str]:
+    """Return ``{name: kind}`` for views and materialized views in a schema.
+
+    Materialized views are PostgreSQL-specific; other dialects return only
+    normal views. Any inspection error collapses to an empty dict so base-table
+    profiling is never affected.
+    """
+    kinds: dict[str, str] = {}
+    try:
+        for name in inspector.get_view_names(schema=schema):
+            kinds[name] = OBJECT_VIEW
+    except (SQLAlchemyError, NotImplementedError):
+        # Dialects without view support raise NotImplementedError; missing
+        # catalog access raises SQLAlchemyError. Either way, degrade to no views.
+        pass
+    if dialect == "postgresql":
+        for name in _postgres_materialized_view_names(inspector, schema):
+            kinds[name] = OBJECT_MATERIALIZED_VIEW
+    return kinds
+
+
+def _postgres_materialized_view_names(
+    inspector: Any, schema: str | None
+) -> list[str]:
+    """Materialized view names for PostgreSQL, or ``[]`` if unsupported.
+
+    ``Inspector.get_materialized_view_names`` exists on SQLAlchemy 2.0+ for the
+    PostgreSQL dialect; older versions (or dialects without it) return ``[]``.
+    """
+    method = getattr(inspector, "get_materialized_view_names", None)
+    if method is None:
+        return []
+    try:
+        return list(method(schema=schema))
+    except (SQLAlchemyError, NotImplementedError):
+        return []
 
 
 def profile_database(
@@ -51,6 +110,7 @@ def profile_database(
     table_names: list[str] | None = None,
     skipped_technical_tables: list[str] | None = None,
     permission_report: PermissionReport | None = None,
+    kinds: dict[str, str] | None = None,
 ) -> str:
     tables = table_names if table_names is not None else []
     database = engine.url.database or ""
@@ -66,9 +126,12 @@ def profile_database(
         f"schema: {schema_value}",
     ]
     if table_names is None:
-        tables, computed_skipped = list_schema_tables(engine, options)
+        tables, computed_skipped, computed_kinds = list_schema_tables(engine, options)
         if skipped_technical_tables is None:
             skipped_technical_tables = computed_skipped
+        kinds = computed_kinds
+    if kinds is None:
+        kinds = {}
     if skipped_technical_tables:
         lines.append("skipped_technical_tables:")
         for name in sorted(skipped_technical_tables):
@@ -127,8 +190,13 @@ def profile_database(
 
             # When every row is listed below, the CREATE TABLE is redundant: the
             # row data already exposes columns, types, and constraints.
-            skip_create_table = size_info is not None and size_info.all_rows_listed(
-                options
+            kind = kinds.get(table_name, OBJECT_TABLE)
+            # A view's rows never reveal its SELECT definition, so always emit
+            # the view DDL even when every row is listed (unlike base tables).
+            skip_create_table = (
+                kind == OBJECT_TABLE
+                and size_info is not None
+                and size_info.all_rows_listed(options)
             )
 
             ddl: TableDdl | None = None
@@ -136,7 +204,7 @@ def profile_database(
             if not skip_create_table:
                 if not options.use_dump_ddl and table is not None:
                     try:
-                        ddl = get_table_ddl(conn, table)
+                        ddl = get_table_ddl(conn, table, kind=kind)
                     except Exception as exc:
                         ddl_exc = exc
 

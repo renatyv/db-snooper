@@ -29,6 +29,12 @@ from db_snooper.profiling.columns import (
 from db_snooper.profiling.models import ProfileOptions
 from db_snooper.shared import is_sensitive
 
+# Kind of a schema object, used to choose the right DDL emitter. These are
+# imported by profiling.core (importing core here would be circular).
+OBJECT_TABLE = "table"
+OBJECT_VIEW = "view"
+OBJECT_MATERIALIZED_VIEW = "materialized_view"
+
 
 @dataclass
 class TableDdl:
@@ -77,13 +83,126 @@ def compact_index_sql(sql: str) -> str:
     return f"{unique} {rest}".strip() if unique else rest
 
 
-def get_table_ddl(conn: Connection, table: Table) -> TableDdl:
+def get_table_ddl(
+    conn: Connection, table: Table, kind: str = OBJECT_TABLE
+) -> TableDdl:
+    if kind in {OBJECT_VIEW, OBJECT_MATERIALIZED_VIEW}:
+        return get_view_ddl(conn, table, kind)
     dialect_name = conn.dialect.name
     if dialect_name == "sqlite":
         return get_sqlite_ddl(conn, table.name)
     if dialect_name in {"mysql", "mariadb"}:
         return get_mysql_ddl(conn, table)
     return get_reflected_ddl(conn, table)
+
+
+def get_view_ddl(conn: Connection, table: Table, kind: str) -> TableDdl:
+    """Return DDL for a view or materialized view.
+
+    A view cannot be reconstructed from its reflected columns, so each dialect
+    reads the stored definition (``pg_get_viewdef``, ``sqlite_master``,
+    ``information_schema.views``, ``duckdb_views()``). Materialized views also
+    expose their indexes, reflected from the catalog.
+    """
+    dialect_name = conn.dialect.name
+    if dialect_name == "postgresql":
+        return _postgres_view_ddl(conn, table, kind)
+    if dialect_name == "sqlite":
+        return _sqlite_view_ddl(conn, table.name)
+    if dialect_name == "duckdb":
+        return _duckdb_view_ddl(conn, table)
+    if dialect_name in {"mysql", "mariadb"}:
+        return _mysql_view_ddl(conn, table)
+    # Unrecognized dialect: fall back to reflected columns so the object still
+    # surfaces with its column shape rather than disappearing from the profile.
+    return get_reflected_ddl(conn, table)
+
+
+def _view_keyword(kind: str) -> str:
+    return (
+        "CREATE MATERIALIZED VIEW"
+        if kind == OBJECT_MATERIALIZED_VIEW
+        else "CREATE VIEW"
+    )
+
+
+def _materialized_view_indexes(conn: Connection, table: Table) -> list[str]:
+    indexes: list[str] = []
+    for index in sorted(table.indexes, key=lambda idx: idx.name or ""):
+        full = ensure_semicolon(str(CreateIndex(index).compile(conn)))
+        indexes.append(compact_index_sql(full))
+    return indexes
+
+
+def _postgres_view_ddl(conn: Connection, table: Table, kind: str) -> TableDdl:
+    # pg_get_viewdef takes the relation OID and returns just the SELECT body;
+    # joining pg_class avoids the ``::regclass`` cast that collides with
+    # SQLAlchemy's ``:param`` bind syntax. Works for both views ('v') and
+    # materialized views ('m').
+    body = conn.execute(
+        text(
+            "SELECT pg_get_viewdef(c.oid, true) FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = :schema AND c.relname = :name"
+        ),
+        {"schema": table.schema, "name": table.name},
+    ).scalar_one_or_none()
+    qualified = conn.dialect.identifier_preparer.format_table(table)
+    keyword = _view_keyword(kind)
+    create_table: list[str] = []
+    if body:
+        create_table.append(
+            ensure_semicolon(f"{keyword} {qualified} AS\n{body.strip().rstrip(';')}")
+        )
+    else:
+        create_table.append(ensure_semicolon(f"{keyword} {qualified} AS SELECT *"))
+    indexes = (
+        _materialized_view_indexes(conn, table)
+        if kind == OBJECT_MATERIALIZED_VIEW
+        else []
+    )
+    return TableDdl(create_table=create_table, indexes=indexes)
+
+
+def _sqlite_view_ddl(conn: Connection, table_name: str) -> TableDdl:
+    # sqlite_master stores the full ``CREATE VIEW ... AS SELECT ...`` text.
+    sql = conn.execute(
+        text("SELECT sql FROM sqlite_master WHERE type = 'view' AND name = :name"),
+        {"name": table_name},
+    ).scalar_one_or_none()
+    create_table = [ensure_semicolon(str(sql))] if sql else []
+    return TableDdl(create_table=create_table, indexes=[])
+
+
+def _duckdb_view_ddl(conn: Connection, table: Table) -> TableDdl:
+    schema = table.schema or "main"
+    sql = conn.execute(
+        text(
+            "SELECT sql FROM duckdb_views() "
+            "WHERE schema_name = :schema AND view_name = :name"
+        ),
+        {"schema": schema, "name": table.name},
+    ).scalar_one_or_none()
+    create_table = [ensure_semicolon(str(sql))] if sql else []
+    return TableDdl(create_table=create_table, indexes=[])
+
+
+def _mysql_view_ddl(conn: Connection, table: Table) -> TableDdl:
+    schema = table.schema or conn.dialect.default_schema_name
+    body = conn.execute(
+        text(
+            "SELECT view_definition FROM information_schema.views "
+            "WHERE table_schema = :schema AND table_name = :name"
+        ),
+        {"schema": schema, "name": table.name},
+    ).scalar_one_or_none()
+    qualified = conn.dialect.identifier_preparer.format_table(table)
+    create_table: list[str] = []
+    if body is not None:
+        create_table.append(
+            ensure_semicolon(f"CREATE VIEW {qualified} AS {body.strip().rstrip(';')}")
+        )
+    return TableDdl(create_table=create_table, indexes=[])
 
 
 def get_sqlite_ddl(conn: Connection, table_name: str) -> TableDdl:

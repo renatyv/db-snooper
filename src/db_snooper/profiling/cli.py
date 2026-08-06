@@ -149,7 +149,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         for schema in schemas:
             active_schema = schema
             schema_options = replace(options, schema=schema)
-            tables, skipped_technical = list_schema_tables(engine, schema_options)
+            tables, skipped_technical, kinds = list_schema_tables(engine, schema_options)
             if skipped_technical:
                 _logger.warning(
                     "Skipped technical tables in %s: %s",
@@ -177,6 +177,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
                         progress=show_progress,
                         table_names=[table_name],
                         permission_report=perm_report,
+                        kinds=kinds,
                     )
                     if table_output.strip():
                         (schema_dir / f"{output_component(table_name)}.md").write_text(
@@ -190,6 +191,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
                     table_names=tables,
                     skipped_technical_tables=skipped_technical,
                     permission_report=perm_report,
+                    kinds=kinds,
                 )
                 output_dir.mkdir(parents=True, exist_ok=True)
                 (output_dir / f"{output_component(schema)}.md").write_text(
