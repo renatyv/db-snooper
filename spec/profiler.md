@@ -9,7 +9,7 @@ Generate a single `db_/schema.sql` profile per schema by default. When requested
 
 For each table:
 1. Skip empty tables. A table with zero rows carries no data context, so it is excluded from the profile by default. The skipped names are listed once in a trailing summary line, e.g. `-- Skipped 2 empty table(s): foo, bar`. Force their inclusion with `--include-empty-tables`; an included empty table emits only its `CREATE TABLE` DDL and a `-- total rows=0` line, with no rows or column profiles (there is nothing to profile).
-2. Generate `CREATE TABLE` DDL with all indexes and constraints. Omit the DDL when the table is small enough that every row is dumped below (the `ALL_ROWS` case in step 3): the row data already exposes columns, types, and constraints, so the DDL is redundant. The DDL is still emitted for larger tables, for included empty tables, and for catalog-profiled huge tables.
+2. Generate `CREATE TABLE` DDL with all indexes and constraints. Omit the DDL when the table is small enough that every row is dumped below (the "all rows" case in step 3): the row data already exposes columns, types, and constraints, so the DDL is redundant. The DDL is still emitted for larger tables, for included empty tables, and for catalog-profiled huge tables.
 3. Generate a data profile.
    - Use query timouts to prevent hanging queries. If a query runs for 10s or more -> abort the query and skip this metric
    - Use internal database stats to estimate number of rows. If its hundreds of millions or more -> use the internal stats to generate profile, don't run any queries. Instead, summarize each column from the engine's catalog statistics (PostgreSQL `pg_stats`, MySQL `COLUMN_STATISTICS` histograms, MariaDB `mysql.column_stats`): approximate null fraction, distinct count, numeric min/max, and top values. Mark these estimates with `≈` and a `(from db stats)` tag so they are distinguishable from exact metrics.
@@ -81,8 +81,8 @@ CREATE TABLE `action_status_history` (
 -- time: nulls=0, non_nulls=551830, distinct=551830
 
 
--- total rows=2
--- ALL_ROWS: blocked_area
+-- blocked_area
+-- all rows
 -- row: {"id": "40307", "level": "0", "reason": "NOT_IN_USE", "robot_id": "5", "timestamp": "2026-06-25 14:32:42", "x_begin_mm": "1000", "x_end_mm": "1500", "y_begin_mm": "3797", "y_end_mm": "4497"}
 -- row: {"id": "40308", "level": "0", "reason": "NOT_IN_USE", "robot_id": "5", "timestamp": "2026-06-25 14:32:42", "x_begin_mm": "1500", "x_end_mm": "1980", "y_begin_mm": "3797", "y_end_mm": "4497"}
 ```

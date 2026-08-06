@@ -189,14 +189,17 @@ def profile_table(
     if total_rows is None:
         # Unreachable: is_large/timed_out return early above.
         return [f"-- {table.name}: skipped (row count unavailable)"]
-    lines = [f"-- total rows={total_rows}"]
     if total_rows <= options.small_table_threshold:
-        marker, descriptor = (
-            ("ALL_ROWS", "all rows listed below")
-            if total_rows <= options.sample_row_limit
-            else ("SAMPLED_ROWS", f"first {options.sample_row_limit} rows listed below")
-        )
-        lines.append(f"-- {marker}: {table.name} ({descriptor})")
+        if total_rows <= options.sample_row_limit:
+            # Every row is listed below, so the rows themselves expose both the
+            # count and the schema: the CREATE TABLE is omitted and no row count
+            # is printed. Lead with the table name as a header (no DDL here).
+            lines = [f"-- {table.name}", "-- all rows"]
+        else:
+            # More rows than the sample cap: only the first rows are listed, so
+            # keep the total count. The CREATE TABLE above already names the
+            # table.
+            lines = [f"-- first {options.sample_row_limit} of {total_rows} rows"]
         sampled: list[dict[str, Any]] = []
         with query_timeout.metric(conn, [], "sampled rows"):
             sampled = sample_rows(conn, table, options.sample_row_limit)
@@ -204,6 +207,7 @@ def profile_table(
             lines.append(f"-- row: {json_dumps(row)}")
         return lines
 
+    lines = [f"-- total rows={total_rows}"]
     lines.append(f"-- LATEST_ROWS: {table.name} (most recent rows listed below)")
     latest: list[dict[str, Any]] = []
     with query_timeout.metric(conn, [], "latest rows"):
