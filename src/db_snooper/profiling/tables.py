@@ -136,7 +136,7 @@ def profile_table_from_stats(
     # The table is too large to scan, but its catalog stats are free. Emit a
     # per-column summary derived entirely from those stats.
     lines = [
-        f"-- total rows≈{estimate} "
+        f"- total rows≈{estimate} "
         "(estimated from db stats; row/column profiling skipped)"
     ]
     catalog = get_catalog_column_stats(conn, table, estimate)
@@ -169,9 +169,9 @@ def _catalog_column_lines(column: Any, stat: Any, estimate: int) -> list[str]:
         # even when null/distinct stats are absent but min/max or top_values
         # are available.
         lines.append(
-            f"-- {column.name} (from db stats): {', '.join(parts)}"
+            f"- {column.name} (from db stats): {', '.join(parts)}"
             if parts
-            else f"-- {column.name} (from db stats):"
+            else f"- {column.name} (from db stats):"
         )
     if has_numeric:
         lines.append(
@@ -187,6 +187,29 @@ def _catalog_column_lines(column: Any, stat: Any, estimate: int) -> list[str]:
     return lines
 
 
+def _format_rows_block(
+    label: str, rows: list[dict[str, Any]]
+) -> list[str]:
+    """Format sampled rows as a labelled, line-broken JSON array.
+
+    The array stays valid JSON (no trailing comma) while putting each row on its
+    own indented line for readability::
+
+        - <label>: [
+          {...},
+          {...}
+        ]
+    """
+    if not rows:
+        return [f"- {label}: []"]
+    lines = [f"- {label}: ["]
+    for index, row in enumerate(rows):
+        suffix = "" if index == len(rows) - 1 else ","
+        lines.append(f"  {json_dumps(row)}{suffix}")
+    lines.append("]")
+    return lines
+
+
 def profile_table(
     conn: Connection,
     table: Table,
@@ -199,43 +222,41 @@ def profile_table(
     if size_info.is_large:
         return profile_table_from_stats(conn, table, size_info.estimate)
     if size_info.timed_out:
-        return [f"-- {table.name}: skipped (row count query timeout)"]
+        return [f"- {table.name}: skipped (row count query timeout)"]
     total_rows = size_info.total_rows
     if total_rows is None:
         # Unreachable: is_large/timed_out return early above.
-        return [f"-- {table.name}: skipped (row count unavailable)"]
+        return [f"- {table.name}: skipped (row count unavailable)"]
     if total_rows <= options.small_table_threshold:
         if total_rows <= options.sample_row_limit:
             # Every row is listed below, so the rows themselves expose both the
             # count and the schema: the CREATE TABLE is omitted and no row count
-            # is printed. Lead with the table name as a header (no DDL here).
-            lines = [f"-- {table.name}", "-- all rows"]
+            # is printed. The table name is the section heading (emitted by the
+            # caller), so lead only with the "all rows" marker.
+            label = "all rows"
         else:
             # More rows than the sample cap: only the first rows are listed, so
             # keep the total count. The CREATE TABLE above already names the
             # table.
-            lines = [f"-- first {options.sample_row_limit} of {total_rows} rows"]
+            label = f"first {options.sample_row_limit} of {total_rows} rows"
         sampled: list[dict[str, Any]] = []
         with query_timeout.metric(conn, [], "sampled rows"):
             sampled = sample_rows(conn, table, options.sample_row_limit)
-        for row in sampled:
-            lines.append(f"-- row: {json_dumps(row)}")
-        return lines
+        return _format_rows_block(label, sampled)
 
-    lines = [f"-- total rows={total_rows}"]
-    lines.append(f"-- LATEST_ROWS: {table.name} (most recent rows listed below)")
+    # The table name is the section heading (emitted by the caller), so it
+    # is not repeated here. Each sample is a labelled, line-broken JSON array
+    # for readability.
+    lines = [f"- total rows={total_rows}"]
     latest: list[dict[str, Any]] = []
     with query_timeout.metric(conn, [], "latest rows"):
         latest = latest_rows(conn, table, 3)
-    for row in latest:
-        lines.append(f"-- row: {json_dumps(row)}")
+    lines.extend(_format_rows_block("latest_rows (most recent)", latest))
 
-    lines.append(f"-- RANDOM_ROWS: {table.name} (random sample listed below)")
     random_sample: list[dict[str, Any]] = []
     with query_timeout.metric(conn, [], "random rows"):
         random_sample = random_rows(conn, table, 5)
-    for row in random_sample:
-        lines.append(f"-- row: {json_dumps(row)}")
+    lines.extend(_format_rows_block("random_rows (random sample)", random_sample))
 
     unique_columns = get_unique_column_names(table)
     indexed_columns = get_indexed_column_names(table)

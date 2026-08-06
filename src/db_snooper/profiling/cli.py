@@ -69,7 +69,7 @@ def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument(
         "--per-table",
         action="store_true",
-        help="Write one .sql profile per table instead of one schema profile.",
+        help="Write one .md profile per table instead of one schema profile.",
     )
     parser.add_argument("--include-tables", help="Comma-separated table allowlist.")
     parser.add_argument("--exclude-tables", help="Comma-separated table denylist.")
@@ -179,7 +179,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
                         permission_report=perm_report,
                     )
                     if table_output.strip():
-                        (schema_dir / f"{output_component(table_name)}.sql").write_text(
+                        (schema_dir / f"{output_component(table_name)}.md").write_text(
                             table_output, encoding="utf-8"
                         )
             else:
@@ -192,7 +192,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
                     permission_report=perm_report,
                 )
                 output_dir.mkdir(parents=True, exist_ok=True)
-                (output_dir / f"{output_component(schema)}.sql").write_text(
+                (output_dir / f"{output_component(schema)}.md").write_text(
                     output, encoding="utf-8"
                 )
     except SQLAlchemyError as exc:

@@ -5,10 +5,10 @@ To efficiently convert text to analytic SQL queries, LLMs need database schema a
 
 For each database create a separate folder with subfolders for each of the schemas.
 
-Generate a single `db_/schema.sql` profile per schema by default. When requested with `--per-table`, generate separate files `db_/schema/table.sql`.
+Generate a single `db_/schema.md` profile per schema by default. When requested with `--per-table`, generate separate files `db_/schema/table.md`.
 
 For each table:
-1. Skip empty tables. A table with zero rows carries no data context, so it is excluded from the profile by default. The skipped names are listed once in a trailing summary line, e.g. `-- Skipped 2 empty table(s): foo, bar`. Force their inclusion with `--include-empty-tables`; an included empty table emits only its `CREATE TABLE` DDL and a `-- total rows=0` line, with no rows or column profiles (there is nothing to profile).
+1. Skip empty tables. A table with zero rows carries no data context, so it is excluded from the profile by default. The skipped names are listed once in a trailing summary bullet, e.g. `- Skipped 2 empty table(s): foo, bar`. Force their inclusion with `--include-empty-tables`; an included empty table emits only its `CREATE TABLE` DDL (and an empty `all rows` marker), with no rows or column profiles (there is nothing to profile).
 2. Generate `CREATE TABLE` DDL with all indexes and constraints. Omit the DDL when the table is small enough that every row is dumped below (the "all rows" case in step 3): the row data already exposes columns, types, and constraints, so the DDL is redundant. The DDL is still emitted for larger tables, for included empty tables, and for catalog-profiled huge tables.
 3. Generate a data profile.
    - Use query timouts to prevent hanging queries. If a query runs for 10s or more -> abort the query and skip this metric
@@ -40,18 +40,23 @@ For each table:
 
 Single profile for a schema `main` in database `dive_sim`
 
-`dive_sim/main.sql`
+`dive_sim/main.md`
 
-Each table emits its `CREATE TABLE` DDL followed by its profile. Small tables that dump every row omit the DDL (the rows already expose the schema); empty tables are skipped entirely and listed in a trailing summary.
+Each table emits its own `## table_name` section with `CREATE TABLE` DDL in a fenced `sql` block followed by its profile. Small tables that dump every row omit the DDL (the rows already expose the schema); empty tables are skipped entirely and listed in a trailing summary.
 
-```SQL
--- db-snooper
--- version: 0.0.1
--- generated_at_utc: 2026-07-22T12:34:56.789012Z
--- dialect: mysql
--- database: dive_sim
--- schema: main
+````markdown
+---
+generator: db-snooper
+version: 0.0.1
+generated_at_utc: 2026-07-22T12:34:56.789012Z
+dialect: mysql
+database: dive_sim
+schema: main
+---
 
+## action_status_history
+
+```sql
 CREATE TABLE `action_status_history` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
   `action_history_id` int(11) NOT NULL,
@@ -66,27 +71,29 @@ CREATE TABLE `action_status_history` (
   CONSTRAINT `action_status_history_ibfk_1` FOREIGN KEY (`action_history_id`) REFERENCES `action_history` (`id`),
   CONSTRAINT `action_status_history_ibfk_2` FOREIGN KEY (`state_history_id`) REFERENCES `robot_state_history` (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=943812 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
--- total rows=551830
--- action_history_id: nulls=0, non_nulls=551830, distinct=179744
---   numeric: min=362732, median=459736, max=542475
---   top_values: 423373=4, 423378=4, 423383=4, 423384=4, 423386=4, 423387=4, 423388=4, 423391=4, 423392=4, 423395=4
--- action_status: nulls=0, non_nulls=551830, distinct=5
---   values: SCHEDULED=298848, DONE=165650, EXEC=73332, FAILED=12558, FAILED_TIMEOUT=1442
--- id: unique values=551830, range=391982..943811
--- state_history_id: nulls=98520, non_nulls=453310, distinct=453310
---   numeric: min=734084, median=960738, max=1187393
--- tick: nulls=0, non_nulls=551830, distinct=12029
---   numeric: min=1, median=854, max=15446
---   top_values: 1=4069, 2=1772, 3=1463, 10=1133, 4=861, 21=855, 20=852, 15=839, 5=837, 22=834
--- time: nulls=0, non_nulls=551830, distinct=551830
-
-
--- blocked_area
--- all rows
--- row: {"id": "40307", "level": "0", "reason": "NOT_IN_USE", "robot_id": "5", "timestamp": "2026-06-25 14:32:42", "x_begin_mm": "1000", "x_end_mm": "1500", "y_begin_mm": "3797", "y_end_mm": "4497"}
--- row: {"id": "40308", "level": "0", "reason": "NOT_IN_USE", "robot_id": "5", "timestamp": "2026-06-25 14:32:42", "x_begin_mm": "1500", "x_end_mm": "1980", "y_begin_mm": "3797", "y_end_mm": "4497"}
 ```
+
+- total rows=551830
+- action_history_id: nulls=0, non_nulls=551830, distinct=179744
+  - numeric: min=362732, median=459736, max=542475
+  - top_values: 423373=4, 423378=4, 423383=4, 423384=4, 423386=4, 423387=4, 423388=4, 423391=4, 423392=4, 423395=4
+- action_status: nulls=0, non_nulls=551830, distinct=5
+  - values: SCHEDULED=298848, DONE=165650, EXEC=73332, FAILED=12558, FAILED_TIMEOUT=1442
+- id: unique values=551830, range=391982..943811
+- state_history_id: nulls=98520, non_nulls=453310, distinct=453310
+  - numeric: min=734084, median=960738, max=1187393
+- tick: nulls=0, non_nulls=551830, distinct=12029
+  - numeric: min=1, median=854, max=15446
+  - top_values: 1=4069, 2=1772, 3=1463, 10=1133, 4=861, 21=855, 20=852, 15=839, 5=837, 22=834
+- time: nulls=0, non_nulls=551830, distinct=551830
+
+
+## blocked_area
+
+- all rows
+  - row: {"id": "40307", "level": "0", "reason": "NOT_IN_USE", "robot_id": "5", "timestamp": "2026-06-25 14:32:42", "x_begin_mm": "1000", "x_end_mm": "1500", "y_begin_mm": "3797", "y_end_mm": "4497"}
+  - row: {"id": "40308", "level": "0", "reason": "NOT_IN_USE", "robot_id": "5", "timestamp": "2026-06-25 14:32:42", "x_begin_mm": "1500", "x_end_mm": "1980", "y_begin_mm": "3797", "y_end_mm": "4497"}
+````
 
 
 ## Implementation

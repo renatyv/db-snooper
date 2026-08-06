@@ -9,7 +9,7 @@
 
 DB Snooper generates compact, LLM-ready database context for SQL generation, query debugging, and schema exploration. Profiling alone drives state-of-the-art text-to-SQL accuracy ([Automatic Metadata Extraction for Text-to-SQL](https://arxiv.org/abs/2505.19988)). Supports SQLite, PostgreSQL, MySQL, MariaDB, and DuckDB. Requires Python ≥ 3.10.
 
-It inspects an existing database and produces a SQL profile (`<database>/<schema>.sql`): DDL, row counts, sampled rows, and per-column summaries. Use `--per-table` for one `.sql` per table.
+It inspects an existing database and produces a Markdown profile (`<database>/<schema>.md`): DDL, row counts, sampled rows, and per-column summaries. Use `--per-table` for one `.md` per table.
 
 AI agents and text-to-SQL pipelines can read this context instead of guessing table meanings.
 
@@ -25,13 +25,13 @@ Or run instantly with `uvx` (no install needed):
 uvx db-snooper profile --db-type mysql --user user --password password --database db --schema sch --port 3306
 ```
 
-This creates a profile at `db/sch.sql`.
+This creates a profile at `db/sch.md`.
 
 ## What The Outputs Contain
 
-The profile `.sql` file contains:
+The profile `.md` file contains:
 
-- Metadata with db-snooper version, UTC generation timestamp, SQL dialect, database name, and schema.
+- Metadata (YAML frontmatter) with db-snooper version, UTC generation timestamp, SQL dialect, database name, and schema.
 - `CREATE TABLE` DDL, indexes, and constraints.
 - Total row counts.
 - Deterministic sampled rows for small tables.
@@ -40,8 +40,8 @@ The profile `.sql` file contains:
 - Catalog-derived estimates for very large tables (or metrics that are skipped on medium-large tables) from each engine's internal statistics — PostgreSQL `pg_stats`, MySQL `COLUMN_STATISTICS` histograms, and MariaDB `mysql.column_stats` — emitted with a `≈`/`(from db stats)` marker so they are distinguishable from exact values.
 - Top-level key frequencies for JSON/JSONB columns and min/avg/max element counts for ARRAY columns (when row counts allow).
 - Redacted values for sensitive column names containing `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token`.
-- A `-- skipped technical tables:` line naming migration/framework tables excluded from the profile.
-- Empty tables are skipped by default (no DDL, no rows). A `-- Skipped N empty table(s):` line names them; use `--include-empty-tables` to emit their `CREATE TABLE`.
+- A `skipped_technical_tables` entry in the frontmatter naming migration/framework tables excluded from the profile.
+- Empty tables are skipped by default (no DDL, no rows). A `- Skipped N empty table(s):` bullet names them; use `--include-empty-tables` to emit their `CREATE TABLE`.
 - For small tables whose rows are all listed, the `CREATE TABLE` is omitted — the row data already exposes columns, types, and constraints.
 
 ## Database Examples
@@ -123,7 +123,7 @@ Profile options:
 - `--exclude-tables table_c`: skip selected tables.
 - `--include-technical-tables`: profile migration/framework tables (e.g. `schema_migrations`, `alembic_version`, `flyway_schema_history`, `django_migrations`) that are skipped by default.
 - `--include-empty-tables`: emit the `CREATE TABLE` for tables with zero rows. By default empty tables are skipped entirely.
-- `--per-table`: generate one `.sql` profile for each table instead of a single schema profile.
+- `--per-table`: generate one `.md` profile for each table instead of a single schema profile.
 
 ## Python API
 
@@ -134,7 +134,7 @@ from db_snooper import generate_profile
 
 database_url = "sqlite:///eval-dataset/superhero/superhero.sqlite"
 
-profile_sql = generate_profile(database_url)
+profile_md = generate_profile(database_url)
 ```
 
 Use the lower-level API when you already have a SQLAlchemy engine or need options:
@@ -145,7 +145,7 @@ from db_snooper import ProfileOptions, profile_database
 
 engine = create_engine("sqlite:///eval-dataset/superhero/superhero.sqlite")
 
-profile_sql = profile_database(
+profile_md = profile_database(
     engine,
     ProfileOptions(
         sample_row_limit=25, include_tables=frozenset({"superhero", "publisher"})
@@ -155,7 +155,7 @@ profile_sql = profile_database(
 
 ## Agent Skill
 
-DB Snooper bundles [`db-snooper-profile`](src/db_snooper/skills/SKILL.md), an [agent skill](https://opencode.ai/docs/skills/) for generating schema and data context before writing or debugging SQL. It runs `db-snooper profile` and produces `<database>/<schema>.sql`.
+DB Snooper bundles [`db-snooper-profile`](src/db_snooper/skills/SKILL.md), an [agent skill](https://opencode.ai/docs/skills/) for generating schema and data context before writing or debugging SQL. It runs `db-snooper profile` and produces `<database>/<schema>.md`.
 
 Install it as a Claude Code plugin:
 

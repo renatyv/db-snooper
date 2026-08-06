@@ -60,7 +60,7 @@ def profile_column(
         if non_nulls is not None:
             nulls = total_rows - non_nulls
             if non_nulls == 0:
-                lines = [f"-- {column.name}: all NULL"]
+                lines = [f"- {column.name}: all NULL"]
                 lines.extend(_skipped_metric_lines(skipped, timeout_seconds))
                 return lines
 
@@ -103,7 +103,7 @@ def profile_column(
     elif catalog_stat is not None and catalog_stat.distinct is not None:
         summary.append(f"distinct≈{catalog_stat.distinct}")
     lines = [
-        f"-- {column.name}: {', '.join(summary) if summary else 'profile metrics skipped'}"
+        f"- {column.name}: {', '.join(summary) if summary else 'profile metrics skipped'}"
     ]
 
     if is_numeric(column):
@@ -481,11 +481,12 @@ def format_value_counts(values: list[tuple[Any, int]]) -> str:
 def continuation_line(label: str, body: str) -> str:
     """A metric line that belongs to the column header above it.
 
-    Continuation lines omit the repeated column name and the ``value=count``
-    annotation: the header line (the first ``-- col:`` line) already names the
-    column, and the ``label`` makes the metric self-describing.
+    Rendered as a nested markdown bullet: the parent list item (the column
+    header ``- col: ...`` line) already names the column, so continuation lines
+    omit the repeated column name and indent under it. The ``label`` makes the
+    metric self-describing.
     """
-    return f"--   {label}: {body}"
+    return f"  - {label}: {body}"
 
 
 def format_value(value: Any) -> str:

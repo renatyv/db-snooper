@@ -1,12 +1,12 @@
 ---
 name: db-snooper-profile
-description: "Use when an AI agent needs to generate a database schema and data profile (.sql: DDL, row counts, sampled rows, per-column summaries) for text-to-SQL, query planning, schema understanding, or data exploration with db-snooper."
+description: "Use when an AI agent needs to generate a database schema and data profile (.md: DDL, row counts, sampled rows, per-column summaries) for text-to-SQL, query planning, schema understanding, or data exploration with db-snooper."
 compatibility: opencode, OpenWork, PI, Claude, ChatGPT, custom agent runners
 ---
 
 # DB Snooper Profiling
 
-Use this skill to generate a compact, LLM-ready schema and data profile of an existing database before writing or reviewing SQL. It runs `db-snooper profile` to produce a `.sql` artifact containing DDL, indexes/constraints, row counts, sampled rows, and per-column summaries.
+Use this skill to generate a compact, LLM-ready schema and data profile of an existing database before writing or reviewing SQL. It runs `db-snooper profile` to produce a `.md` artifact containing DDL, indexes/constraints, row counts, sampled rows, and per-column summaries.
 
 ## When To Use
 
@@ -35,7 +35,7 @@ uvx db-snooper profile -h
 
 For frequent use, install once with `uv tool install db-snooper` and run `db-snooper ...` directly.
 
-The generated profile (`<database>/<schema>.sql`) contains `CREATE TABLE` DDL with indexes/constraints, total row counts, sampled rows, and per-column null/distinct/range/median/top-value summaries — sensitive columns are redacted and very large tables use internal stats only.
+The generated profile (`<database>/<schema>.md`) contains `CREATE TABLE` DDL with indexes/constraints, total row counts, sampled rows, and per-column null/distinct/range/median/top-value summaries — sensitive columns are redacted and very large tables use internal stats only.
 
 ## Enriching Table And Column Descriptions
 
@@ -46,7 +46,7 @@ db-snooper emits the raw schema and data profile. Turn it into concise, accurate
 - **Example or gold queries**: learn the real join paths and the columns that matter for common questions.
 - **Chat logs or natural-language questions about the data**: capture how users actually refer to tables and fields.
 
-When a profile for the same database already exists (a previously generated `<database>/<schema>.sql`), read it first and carry over its table/column descriptions and field notes, then refine them with the freshly profiled data instead of starting from scratch.
+When a profile for the same database already exists (a previously generated `<database>/<schema>.md`), read it first and carry over its table/column descriptions and field notes, then refine them with the freshly profiled data instead of starting from scratch.
 
 ## Safety And Performance
 

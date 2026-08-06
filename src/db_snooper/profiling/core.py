@@ -54,23 +54,25 @@ def profile_database(
     tables = table_names if table_names is not None else []
     database = engine.url.database or ""
     generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    schema_value = options.schema or engine.dialect.default_schema_name or ""
     lines = [
-        "-- db-snooper",
-        f"-- version: {__version__}",
-        f"-- generated_at_utc: {generated_at}",
-        f"-- dialect: {engine.dialect.name}",
-        f"-- database: {database}",
-        f"-- schema: {options.schema or engine.dialect.default_schema_name or ''}",
+        "---",
+        "generator: db-snooper",
+        f"version: {__version__}",
+        f"generated_at_utc: {generated_at}",
+        f"dialect: {engine.dialect.name}",
+        f"database: {database}",
+        f"schema: {schema_value}",
     ]
     if table_names is None:
         tables, computed_skipped = list_schema_tables(engine, options)
         if skipped_technical_tables is None:
             skipped_technical_tables = computed_skipped
     if skipped_technical_tables:
-        lines.append(
-            "-- skipped technical tables: "
-            + ", ".join(sorted(skipped_technical_tables))
-        )
+        lines.append("skipped_technical_tables:")
+        for name in sorted(skipped_technical_tables):
+            lines.append(f"  - {name}")
+    lines.append("---")
     lines.append("")
 
     with engine.connect() as conn:
@@ -119,6 +121,9 @@ def profile_database(
                     progress(index, len(tables), table_name)
                 continue
 
+            lines.append(f"## {table_name}")
+            lines.append("")
+
             # When every row is listed below, the CREATE TABLE is redundant: the
             # row data already exposes columns, types, and constraints.
             skip_create_table = size_info is not None and size_info.all_rows_listed(
@@ -155,7 +160,7 @@ def profile_database(
                         ddl = None
                     if ddl is not None:
                         lines.append(
-                            f"-- {table_name}: CREATE TABLE via utility fallback"
+                            f"- {table_name}: CREATE TABLE via utility fallback"
                         )
 
                 if ddl is None:
@@ -168,7 +173,7 @@ def profile_database(
                     )
                     failed_ddl_tables.append(table_name)
                     lines.append(
-                        f"-- {table_name}: skipped (DDL generation failed: "
+                        f"- {table_name}: skipped (DDL generation failed: "
                         f"{type(exc).__name__}: {exc})"
                     )
                     lines.append("")
@@ -177,13 +182,14 @@ def profile_database(
                         progress(index, len(tables), table_name)
                     continue
 
+                lines.append("```sql")
                 lines.extend(ddl)
-                if lines[-1] != "":
-                    lines.append("")
+                lines.append("```")
+                lines.append("")
 
             if table is None:
                 lines.append(
-                    f"-- {table_name}: column profiling skipped "
+                    f"- {table_name}: column profiling skipped "
                     "(schema via utility fallback)"
                 )
             else:
@@ -222,7 +228,7 @@ def profile_database(
             f"errors: {', '.join(failed_ddl_tables)}"
         )
         _logger.warning(summary)
-        lines.append(f"-- {summary}")
+        lines.append(f"- {summary}")
         lines.append("")
 
     if failed_profile_tables:
@@ -231,7 +237,7 @@ def profile_database(
             f"errors: {', '.join(failed_profile_tables)}"
         )
         _logger.warning(summary)
-        lines.append(f"-- {summary}")
+        lines.append(f"- {summary}")
         lines.append("")
 
     if skipped_empty_tables:
@@ -239,7 +245,7 @@ def profile_database(
             sorted(skipped_empty_tables)
         )
         _logger.info(summary)
-        lines.append(f"-- {summary}")
+        lines.append(f"- {summary}")
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
