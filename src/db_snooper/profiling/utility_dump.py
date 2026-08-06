@@ -8,6 +8,8 @@ import subprocess
 
 from sqlalchemy.engine import URL
 
+from db_snooper.profiling.tables import TableDdl, compact_index_sql
+
 _logger = logging.getLogger("db_snooper")
 
 _UTILITY_FOR_DIALECT: dict[str, str] = {
@@ -35,8 +37,8 @@ def dump_create_table(
     dialect_name: str,
     table_name: str,
     schema: str | None,
-) -> list[str] | None:
-    """Return normalized CREATE TABLE (+ index) DDL lines, or None on any failure.
+) -> TableDdl | None:
+    """Return normalized CREATE TABLE DDL + compact indexes, or None on failure.
 
     Never raises: a missing binary, non-zero exit, parse miss, or subprocess
     error all return None so the caller can skip the table safely.
@@ -72,6 +74,10 @@ def dump_create_table(
     if sql is None:
         return None
     return _normalize(sql)
+
+
+def _compact_indexes(raw_indexes: list[str]) -> list[str]:
+    return [compact_index_sql(idx) for idx in raw_indexes if idx.strip()]
 
 
 def _build_pg_dump_cmd(
@@ -149,13 +155,12 @@ def _run(cmd: list[str], url: URL, binary_name: str) -> str | None:
     return completed.stdout
 
 
-def _normalize(sql: str) -> list[str] | None:
+def _normalize(sql: str) -> TableDdl | None:
     create_table = _extract_create_table_block(sql)
     if create_table is None:
         return None
-    result = [create_table]
-    result.extend(_extract_indexes(sql))
-    return result
+    indexes = _compact_indexes(_extract_indexes(sql))
+    return TableDdl(create_table=[create_table], indexes=indexes)
 
 
 def _extract_create_table_block(sql: str) -> str | None:

@@ -10,6 +10,7 @@ from db_snooper import __version__, query_timeout
 from db_snooper.permissions import PermissionReport, check_permissions, format_warnings
 from db_snooper.profiling.models import ProfileOptions, ProfileProgress
 from db_snooper.profiling.tables import (
+    TableDdl,
     get_table_ddl,
     profile_table,
     resolve_table_size,
@@ -130,7 +131,7 @@ def profile_database(
                 options
             )
 
-            ddl: list[str] | None = None
+            ddl: TableDdl | None = None
             ddl_exc: Exception | None = None
             if not skip_create_table:
                 if not options.use_dump_ddl and table is not None:
@@ -183,9 +184,14 @@ def profile_database(
                     continue
 
                 lines.append("```sql")
-                lines.extend(ddl)
+                lines.extend(ddl.create_table)
                 lines.append("```")
                 lines.append("")
+                if ddl.indexes:
+                    lines.append("- indexes:")
+                    for index_ddl in ddl.indexes:
+                        lines.append(f"  - {index_ddl}")
+                    lines.append("")
 
             if table is None:
                 lines.append(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -29,7 +30,54 @@ from db_snooper.profiling.models import ProfileOptions
 from db_snooper.shared import is_sensitive
 
 
-def get_table_ddl(conn: Connection, table: Table) -> list[str]:
+@dataclass
+class TableDdl:
+    """CREATE TABLE DDL split from a table's index definitions.
+
+    ``create_table`` holds the full CREATE TABLE statement (and any DDL that is
+    not a standalone index). ``indexes`` holds *compact* index descriptors:
+    the verbose ``CREATE [UNIQUE] INDEX <name> ON <table>`` prefix is stripped
+    because an LLM building queries already knows the table (it is the section
+    heading) and rarely needs the index name. The column list and any clauses
+    (USING, WHERE, operator classes, ...) are kept, since those are what make
+    an index relevant to query construction.
+    """
+
+    create_table: list[str]
+    indexes: list[str]
+
+
+# Matches the ``CREATE [UNIQUE] INDEX <name> ON [<schema>.]<table>`` prefix of
+# an index DDL statement, capturing whether it was UNIQUE. Quoted ("...", `...`,
+# [...]) or bare identifiers are accepted for both the index and table names.
+_INDEX_PREFIX_RE = re.compile(
+    r"^\s*CREATE\s+"
+    r"(?P<unique>UNIQUE\s+)?"
+    r"INDEX\s+"
+    r"(?:\"[^\"]+\"|`[^`]+`|\[[^\]]+\]|\S+)\s+"
+    r"ON\s+"
+    r"(?:\"[^\"]+\"|`[^`]+`|\[[^\]]+\]|[\w.]+)\s*",
+    re.IGNORECASE,
+)
+
+
+def compact_index_sql(sql: str) -> str:
+    """Strip the ``CREATE [UNIQUE] INDEX <name> ON <table>`` prefix from DDL.
+
+    ``(ival)`` and ``UNIQUE (fval)`` survive; ``USING gin (col)``, ``WHERE``
+    predicates and operator classes are preserved. If the prefix can't be
+    matched the input is returned unchanged (only trimmed of a trailing
+    semicolon) so nothing is lost.
+    """
+    match = _INDEX_PREFIX_RE.match(sql)
+    if match is None:
+        return sql.strip().rstrip(";").strip()
+    unique = (match.group("unique") or "").strip()
+    rest = sql[match.end():].strip().rstrip(";").strip()
+    return f"{unique} {rest}".strip() if unique else rest
+
+
+def get_table_ddl(conn: Connection, table: Table) -> TableDdl:
     dialect_name = conn.dialect.name
     if dialect_name == "sqlite":
         return get_sqlite_ddl(conn, table.name)
@@ -38,7 +86,7 @@ def get_table_ddl(conn: Connection, table: Table) -> list[str]:
     return get_reflected_ddl(conn, table)
 
 
-def get_sqlite_ddl(conn: Connection, table_name: str) -> list[str]:
+def get_sqlite_ddl(conn: Connection, table_name: str) -> TableDdl:
     table_sql = conn.execute(
         text("select sql from sqlite_master where type = 'table' and name = :name"),
         {"name": table_name},
@@ -52,26 +100,30 @@ def get_sqlite_ddl(conn: Connection, table_name: str) -> list[str]:
         {"name": table_name},
     ).scalars()
 
-    lines: list[str] = []
+    create_table: list[str] = []
     if table_sql:
-        lines.append(ensure_semicolon(str(table_sql)))
-    lines.extend(ensure_semicolon(str(sql)) for sql in index_sql)
-    return lines
+        create_table.append(ensure_semicolon(str(table_sql)))
+    indexes = [compact_index_sql(ensure_semicolon(str(sql))) for sql in index_sql]
+    return TableDdl(create_table=create_table, indexes=indexes)
 
 
-def get_mysql_ddl(conn: Connection, table: Table) -> list[str]:
+def get_mysql_ddl(conn: Connection, table: Table) -> TableDdl:
     quoted_table = conn.dialect.identifier_preparer.format_table(table)
     row = conn.exec_driver_sql(f"SHOW CREATE TABLE {quoted_table}").first()
     if row is None:
-        return []
-    return [ensure_semicolon(str(row[1]))]
+        return TableDdl(create_table=[], indexes=[])
+    # MySQL embeds secondary indexes (KEY/UNIQUE KEY) inside CREATE TABLE, so
+    # there are no separate index statements to extract.
+    return TableDdl(create_table=[ensure_semicolon(str(row[1]))], indexes=[])
 
 
-def get_reflected_ddl(conn: Connection, table: Table) -> list[str]:
-    lines = [ensure_semicolon(str(CreateTable(table).compile(conn)))]
+def get_reflected_ddl(conn: Connection, table: Table) -> TableDdl:
+    create_table = [ensure_semicolon(str(CreateTable(table).compile(conn)))]
+    indexes: list[str] = []
     for index in sorted(table.indexes, key=lambda idx: idx.name or ""):
-        lines.append(ensure_semicolon(str(CreateIndex(index).compile(conn))))
-    return lines
+        full = ensure_semicolon(str(CreateIndex(index).compile(conn)))
+        indexes.append(compact_index_sql(full))
+    return TableDdl(create_table=create_table, indexes=indexes)
 
 
 @dataclass
@@ -251,12 +303,12 @@ def profile_table(
     latest: list[dict[str, Any]] = []
     with query_timeout.metric(conn, [], "latest rows"):
         latest = latest_rows(conn, table, 3)
-    lines.extend(_format_rows_block("latest_rows (most recent)", latest))
+    lines.extend(_format_rows_block("latest rows", latest))
 
     random_sample: list[dict[str, Any]] = []
     with query_timeout.metric(conn, [], "random rows"):
         random_sample = random_rows(conn, table, 5)
-    lines.extend(_format_rows_block("random_rows (random sample)", random_sample))
+    lines.extend(_format_rows_block("random rows sample", random_sample))
 
     unique_columns = get_unique_column_names(table)
     indexed_columns = get_indexed_column_names(table)
