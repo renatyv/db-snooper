@@ -9,7 +9,7 @@ resolution-markers = [
 
 [[package]]
 name = "db-snooper"
-version = "0.0.20"
+version = "0.0.21"
 source = { editable = "." }
 dependencies = [
     { name = "duckdb-engine" },
