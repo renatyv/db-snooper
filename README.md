@@ -32,6 +32,7 @@ This creates a profile at `db/sch.md`.
 The profile `.md` file contains:
 
 - Metadata (YAML frontmatter) with db-snooper version, UTC generation timestamp, SQL dialect, database name, and schema.
+- A top-level `Relationships` section listing every foreign key as `- child.col → parent.col` bullets (composite keys as `child.(c1, c2) → parent.(c1, c2)`). This is emitted even when a table's `CREATE TABLE` is omitted, so join hints stay available regardless of table size.
 - `CREATE TABLE` DDL, indexes, and constraints.
 - Total row counts.
 - Deterministic sampled rows for small tables.

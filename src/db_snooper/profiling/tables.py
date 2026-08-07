@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy import Table, desc, func, select, text
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.schema import CreateIndex, CreateTable
 
 from db_snooper import query_timeout
@@ -74,6 +75,89 @@ class TableDdl:
 
     create_table: list[str]
     indexes: list[str]
+
+
+@dataclass(frozen=True)
+class Relationship:
+    """One foreign-key edge in the schema graph.
+
+    ``constrained_*`` is the local (child) side and ``referred_*`` is the remote
+    (parent) side. ``referred_schema`` is the parent table's schema, or ``None``
+    when it matches the child's schema or the dialect omits it.
+    """
+
+    constrained_table: str
+    constrained_columns: tuple[str, ...]
+    referred_table: str
+    referred_columns: tuple[str, ...]
+    referred_schema: str | None
+
+    @property
+    def is_composite(self) -> bool:
+        return len(self.constrained_columns) > 1
+
+
+def collect_relationships(
+    inspector: Any, tables: list[str], schema: str | None
+) -> list[Relationship]:
+    """Gather every foreign key declared on ``tables`` (catalog metadata only).
+
+    No row scans: this reads each table's FK catalog entry. A table whose FK
+    metadata can't be read is skipped so one unreadable table never hides the
+    rest of the relationships section. Only outgoing edges from the profiled
+    tables are returned; incoming edges from non-profiled tables are not.
+    """
+    relationships: list[Relationship] = []
+    for table_name in tables:
+        try:
+            foreign_keys = inspector.get_foreign_keys(table_name, schema=schema)
+        except (SQLAlchemyError, NotImplementedError):
+            continue
+        for fk in foreign_keys:
+            constrained = tuple(fk.get("constrained_columns") or ())
+            referred = tuple(fk.get("referred_columns") or ())
+            referred_table = fk.get("referred_table") or ""
+            if not constrained or not referred or not referred_table:
+                continue
+            relationships.append(
+                Relationship(
+                    constrained_table=table_name,
+                    constrained_columns=constrained,
+                    referred_table=referred_table,
+                    referred_columns=referred,
+                    referred_schema=fk.get("referred_schema"),
+                )
+            )
+    return relationships
+
+
+def format_relationships(
+    relationships: list[Relationship], schema: str | None
+) -> list[str]:
+    """Render relationships as sorted ``- child.col → parent.col`` bullets.
+
+    Composite keys render as ``child.(c1, c2) → parent.(c1, c2)``. The parent
+    table is schema-qualified only when it lives in a different schema than the
+    one being profiled, keeping the common single-schema case compact.
+    """
+    lines: list[str] = []
+    for rel in sorted(
+        relationships,
+        key=lambda r: (r.constrained_table, r.constrained_columns, r.referred_table),
+    ):
+        child = _format_relationship_side(rel.constrained_table, rel.constrained_columns)
+        parent_table = rel.referred_table
+        if rel.referred_schema and rel.referred_schema != schema:
+            parent_table = f"{rel.referred_schema}.{rel.referred_table}"
+        parent = _format_relationship_side(parent_table, rel.referred_columns)
+        lines.append(f"- {child} → {parent}")
+    return lines
+
+
+def _format_relationship_side(table: str, columns: tuple[str, ...]) -> str:
+    if len(columns) == 1:
+        return f"{table}.{columns[0]}"
+    return f"{table}.({', '.join(columns)})"
 
 
 # Matches the ``CREATE [UNIQUE] INDEX <name> ON [<schema>.]<table>`` prefix of

@@ -19,6 +19,8 @@ from db_snooper.profiling.tables import (
     OBJECT_VIEW,
     TableDdl,
     TableProfile,
+    collect_relationships,
+    format_relationships,
     get_table_ddl,
     profile_table,
     resolve_table_size,
@@ -155,6 +157,19 @@ def profile_database(
         if not tables:
             _logger.warning("No accessible tables to profile; skipping schema.")
             return "\n".join(lines).rstrip() + "\n"
+        # Collect foreign-key relationships once (catalog metadata only, no row
+        # scans) and emit a consolidated section up front. This survives the
+        # small-table case where CREATE TABLE is omitted because every row is
+        # dumped, so join hints stay available regardless of table size.
+        relationship_lines = format_relationships(
+            collect_relationships(inspect(engine), tables, options.schema),
+            options.schema,
+        )
+        if relationship_lines:
+            lines.append("## Relationships")
+            lines.append("")
+            lines.extend(relationship_lines)
+            lines.append("")
         metadata = MetaData()
         failed_ddl_tables: list[str] = []
         failed_profile_tables: list[str] = []
