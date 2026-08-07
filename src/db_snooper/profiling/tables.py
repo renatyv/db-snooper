@@ -35,11 +35,6 @@ OBJECT_TABLE = "table"
 OBJECT_VIEW = "view"
 OBJECT_MATERIALIZED_VIEW = "materialized_view"
 
-# Sampled-row counts for tables above the small-table threshold: the most recent
-# row plus a few random ones, rendered together in one table.
-LATEST_ROW_LIMIT = 1
-RANDOM_ROW_LIMIT = 3
-
 # Section headings emitted inside each table profile. The table name is the
 # top-level heading, so these nest one level below it.
 ROWS_HEADING = "## Rows"
@@ -339,9 +334,7 @@ class TableSizeInfo:
             return False
         if self.total_rows == 0:
             return False
-        return self.total_rows <= min(
-            options.small_table_threshold, options.sample_row_limit
-        )
+        return self.total_rows <= options.small_table_threshold
 
 
 def resolve_table_size(
@@ -504,12 +497,14 @@ def profile_table(
     if total_rows <= options.small_table_threshold:
         sampled: list[dict[str, Any]] = []
         with query_timeout.metric(conn, [], "sampled rows"):
-            sampled = sample_rows(conn, table, options.sample_row_limit)
+            sampled = sample_rows(conn, table, options.small_table_threshold)
         labels = [f"row {index + 1}" for index in range(len(sampled))]
         rows_lines = _format_rows_table(column_names, sampled, labels)
-        # When every row fits, the rows alone expose the count and schema, so no
-        # total is printed and the section is labelled "All rows". A partial
-        # dump (sample cap below the small-table threshold) keeps the total.
+        # Every row fits: we only reach here when total_rows <= threshold, and
+        # the LIMIT is that same threshold, so the rows alone expose the count
+        # and schema. No total is printed and the section is labelled "All
+        # rows". The length guard is defensive against rows vanishing between
+        # the COUNT and the SELECT.
         if sampled and len(sampled) >= total_rows:
             return TableProfile(
                 rows_heading=ALL_ROWS_HEADING,
@@ -522,15 +517,15 @@ def profile_table(
             columns_lines=[],
         )
 
-    # Larger table: total + 1 latest + 3 random rows in one transposed table,
+    # Larger table: total + latest + random rows in one transposed table,
     # then per-column profiles.
     rows_lines = [f"- total={total_rows}"]
     latest: list[dict[str, Any]] = []
     with query_timeout.metric(conn, [], "latest rows"):
-        latest = latest_rows(conn, table, LATEST_ROW_LIMIT)
+        latest = latest_rows(conn, table, options.latest_row_limit)
     random_sample: list[dict[str, Any]] = []
     with query_timeout.metric(conn, [], "random rows"):
-        random_sample = random_rows(conn, table, RANDOM_ROW_LIMIT)
+        random_sample = random_rows(conn, table, options.random_row_limit)
 
     combined = list(latest) + list(random_sample)
     labels = ["latest"] * len(latest) + ["sample"] * len(random_sample)

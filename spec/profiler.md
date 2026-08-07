@@ -14,8 +14,8 @@ For each table:
 3. Generate a data profile.
    - Use query timouts to prevent hanging queries. If a query runs for 10s or more -> abort the query and skip this metric
    - Use internal database stats to estimate number of rows. If its hundreds of millions or more -> use the internal stats to generate profile, don't run any queries. Instead, summarize each column from the engine's catalog statistics (PostgreSQL `pg_stats`, MySQL `COLUMN_STATISTICS` histograms, MariaDB `mysql.column_stats`): approximate null fraction, distinct count, numeric min/max, and top values. Mark these estimates with `≈` and a `(from db stats)` tag so they are distinguishable from exact metrics.
-   - If a table has fewer than 50 rows, include rows up to a small deterministic cap. Never dump values for sensitive fields. Treat column names containing `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token` as sensitive, and redact sampled rows and value profiles.
-   - If a table has more than 50 rows, include the number of rows, 1 latest row, and 3 random ones. Also generate per-column profiles:
+   - If a table has fewer than 10 rows, dump every row (the CREATE TABLE is omitted, since the rows expose the schema). Never dump values for sensitive fields. Treat column names containing `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token` as sensitive, and redact sampled rows and value profiles.
+   - If a table has more than 10 rows, include the number of rows, 1 latest row, and 2 random ones. Also generate per-column profiles:
      - If a column is all `NULL`, emit a one-line `all NULL` summary.
      - If a column is a unique identifier, omit top values and value-shape metadata.
      - If a column has fewer than 20 distinct values, emit the full histogram inline as `value=count` pairs directly on the column line, followed by `nulls=N` (and `non_nulls=N` when informative), e.g. `- COMM_REQ_ATTRIBUTE: CIM=94, nulls=9906` or `- status: open=30, closed=20, pending=10, nulls=2`. Omit the separate `N distinct` / null-count line — the histogram already conveys the distribution. When every value is already listed, no value-shape tag is emitted (it would just repeat the obvious).
@@ -62,10 +62,10 @@ CREATE TABLE dive_sim.batch_box_association (
 
 - total=392
 
-| column | latest | sample | sample | sample |
-|---|---|---|---|---|
-| batch_id | 215 | 12 | 1124 | 11 |
-| box_id | 32000246 | 17000123 | 17000001 | 32000012 |
+| column | latest | sample | sample |
+|---|---|---|---|
+| batch_id | 215 | 12 | 1124 |
+| box_id | 32000246 | 17000123 | 17000001 |
 
 ## Columns
 

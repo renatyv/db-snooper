@@ -9,8 +9,9 @@ from db_snooper.query_timeout import DEFAULT_QUERY_TIMEOUT
 
 @dataclass(frozen=True)
 class ProfileOptions:
-    small_table_threshold: int = 50
-    sample_row_limit: int = 50
+    small_table_threshold: int = 10
+    latest_row_limit: int = 1
+    random_row_limit: int = 2
     large_table_threshold: int = LARGE_TABLE_THRESHOLD
     query_timeout: int = DEFAULT_QUERY_TIMEOUT
     include_tables: frozenset[str] | None = None

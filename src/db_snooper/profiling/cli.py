@@ -35,16 +35,22 @@ def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
     add_connection_arguments(parser)
     parser.add_argument("--output", help="Output directory. Defaults to <database>/.")
     parser.add_argument(
-        "--sample-row-limit",
-        type=int,
-        default=50,
-        help="Maximum sampled rows for small tables.",
-    )
-    parser.add_argument(
         "--small-table-threshold",
         type=int,
-        default=50,
-        help="Rows at or below this count are sampled.",
+        default=10,
+        help="Tables with this many rows or fewer are dumped in full.",
+    )
+    parser.add_argument(
+        "--latest-row-limit",
+        type=int,
+        default=1,
+        help="Most-recent rows (by key) shown for tables above the small-table threshold.",
+    )
+    parser.add_argument(
+        "--random-row-limit",
+        type=int,
+        default=2,
+        help="Random rows shown for tables above the small-table threshold.",
     )
     parser.add_argument(
         "--large-table-threshold",
@@ -112,7 +118,8 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
 
     options = ProfileOptions(
         small_table_threshold=args.small_table_threshold,
-        sample_row_limit=args.sample_row_limit,
+        latest_row_limit=args.latest_row_limit,
+        random_row_limit=args.random_row_limit,
         large_table_threshold=args.large_table_threshold,
         query_timeout=args.query_timeout,
         include_tables=parse_table_set(args.include_tables),

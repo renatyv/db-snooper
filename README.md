@@ -116,9 +116,10 @@ DB_SNOOPER_SCHEMA=reporting db-snooper profile --db-type postgres --database app
 
 Profile options:
 
-- `--small-table-threshold 50`: tables with this many rows or fewer are sampled instead of column-profiled.
+- `--small-table-threshold 10`: tables with this many rows or fewer are dumped in full (their `CREATE TABLE` is omitted since the rows expose the schema).
+- `--latest-row-limit 1`: most-recent rows (by key) shown for larger tables.
+- `--random-row-limit 2`: random rows shown for larger tables.
 - `--large-table-threshold 100000000`: tables whose catalog row estimate is at/above this count are profiled from internal database stats only. `COUNT(*)`, sampled rows, and per-column queries are skipped because they would be too slow on hundreds of millions of rows. Instead, each column is summarized from the engine's catalog statistics (approximate null fraction, distinct count, numeric min/max, and top values), marked with `≈`/`(from db stats)`.
-- `--sample-row-limit 50`: maximum sampled rows for small tables.
 - `--include-tables table_a,table_b`: only profile selected tables.
 - `--exclude-tables table_c`: skip selected tables.
 - `--include-technical-tables`: profile migration/framework tables (e.g. `schema_migrations`, `alembic_version`, `flyway_schema_history`, `django_migrations`) that are skipped by default.
@@ -148,7 +149,7 @@ engine = create_engine("sqlite:///eval-dataset/superhero/superhero.sqlite")
 profile_md = profile_database(
     engine,
     ProfileOptions(
-        sample_row_limit=25, include_tables=frozenset({"superhero", "publisher"})
+        small_table_threshold=25, include_tables=frozenset({"superhero", "publisher"})
     ),
 )
 ```
