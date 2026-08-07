@@ -1,4 +1,5 @@
 # Problem
+
 To efficiently convert text to analytic SQL queries, LLMs need database schema and data context.
 
 # How the Profiler Should Work
@@ -14,7 +15,7 @@ For each table:
    - Use query timouts to prevent hanging queries. If a query runs for 10s or more -> abort the query and skip this metric
    - Use internal database stats to estimate number of rows. If its hundreds of millions or more -> use the internal stats to generate profile, don't run any queries. Instead, summarize each column from the engine's catalog statistics (PostgreSQL `pg_stats`, MySQL `COLUMN_STATISTICS` histograms, MariaDB `mysql.column_stats`): approximate null fraction, distinct count, numeric min/max, and top values. Mark these estimates with `≈` and a `(from db stats)` tag so they are distinguishable from exact metrics.
    - If a table has fewer than 50 rows, include rows up to a small deterministic cap. Never dump values for sensitive fields. Treat column names containing `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token` as sensitive, and redact sampled rows and value profiles.
-   - If a table has more than 50 rows, include the number of rows, three latest rows, and five random rows. Also generate per-column profiles:
+   - If a table has more than 50 rows, include the number of rows, 2 latest rows, and 3 random ones. Also generate per-column profiles:
      - If a column is all `NULL`, emit a one-line `all NULL` summary.
      - If a column is a unique identifier, omit top values and value-shape metadata.
      - If a column has fewer than 20 distinct values, include all non-sensitive values; when every value is already listed, no value-shape tag is emitted (it would just repeat the obvious).
@@ -30,6 +31,7 @@ For each table:
 3. LLM summarization (done separately): A short summary, or minimal profile, identifies the meaning and format of each field and table. If source code is available, use it to produce better summaries.
 
 ## Reliability
+
 - Don't crash on exceptions, just skip the metric.
 - JSON doesn't support `COUNT(distinct)`. Some other columns can't do that either. Think what we can quickly profile from these types. The number of elements for an array, all possible keys for JSON,...
 - When profiling JSON/JSONB, you need to provide reasonable gates so that requests don't hang if the JSON data stored is too large or if there are too many of them.
@@ -45,56 +47,50 @@ Single profile for a schema `main` in database `dive_sim`
 Each table emits its own `## table_name` section with `CREATE TABLE` DDL in a fenced `sql` block followed by its profile. Small tables that dump every row omit the DDL (the rows already expose the schema); empty tables are skipped entirely and listed in a trailing summary.
 
 ````markdown
----
-generator: db-snooper
-version: 0.0.1
-generated_at_utc: 2026-07-22T12:34:56.789012Z
-dialect: mysql
-database: dive_sim
-schema: main
----
-
-## action_status_history
+# batch_box_association
 
 ```sql
-CREATE TABLE `action_status_history` (
-  `id` int(11) NOT NULL AUTO_INCREMENT,
-  `action_history_id` int(11) NOT NULL,
-  `tick` int(11) NOT NULL,
-  `time` timestamp(3) NOT NULL,
-  `action_status` varchar(255) NOT NULL,
-  `state_history_id` int(11) DEFAULT NULL,
-  PRIMARY KEY (`id`),
-  KEY `action_history_id` (`action_history_id`),
-  KEY `state_history_id` (`state_history_id`),
-  KEY `action_status_history_time_IDX` (`time`) USING BTREE,
-  CONSTRAINT `action_status_history_ibfk_1` FOREIGN KEY (`action_history_id`) REFERENCES `action_history` (`id`),
-  CONSTRAINT `action_status_history_ibfk_2` FOREIGN KEY (`state_history_id`) REFERENCES `robot_state_history` (`id`)
-) ENGINE=InnoDB AUTO_INCREMENT=943812 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+CREATE TABLE dive_sim.batch_box_association (
+    batch_id BIGINT NOT NULL,
+    box_id BIGINT NOT NULL,
+    CONSTRAINT idx_16740_primary PRIMARY KEY (batch_id, box_id),
+    CONSTRAINT batch_box_association_ibfk_1 FOREIGN KEY(batch_id) REFERENCES dive_sim.batch (id) ON DELETE CASCADE ON UPDATE RESTRICT,
+    CONSTRAINT batch_box_association_ibfk_2 FOREIGN KEY(box_id) REFERENCES dive_sim.box (id) ON DELETE CASCADE ON UPDATE RESTRICT
+);
 ```
 
-- total rows=551830
-- action_history_id: nulls=0, non_nulls=551830, distinct=179744
-  - numeric: min=362732, median=459736, max=542475
-  - top_values: 423373=4, 423378=4, 423383=4, 423384=4, 423386=4, 423387=4, 423388=4, 423391=4, 423392=4, 423395=4
-- action_status: nulls=0, non_nulls=551830, distinct=5
-  - values: SCHEDULED=298848, DONE=165650, EXEC=73332, FAILED=12558, FAILED_TIMEOUT=1442
-- id: unique values=551830, range=391982..943811
-- state_history_id: nulls=98520, non_nulls=453310, distinct=453310
-  - numeric: min=734084, median=960738, max=1187393
-- tick: nulls=0, non_nulls=551830, distinct=12029
-  - numeric: min=1, median=854, max=15446
-  - top_values: 1=4069, 2=1772, 3=1463, 10=1133, 4=861, 21=855, 20=852, 15=839, 5=837, 22=834
-- time: nulls=0, non_nulls=551830, distinct=551830
+## Indexes
 
+- (box_id)
+- (batch_id, box_id) WHERE box_id > 12
 
-## blocked_area
+## Rows
 
-- all rows
-  - row: {"id": "40307", "level": "0", "reason": "NOT_IN_USE", "robot_id": "5", "timestamp": "2026-06-25 14:32:42", "x_begin_mm": "1000", "x_end_mm": "1500", "y_begin_mm": "3797", "y_end_mm": "4497"}
-  - row: {"id": "40308", "level": "0", "reason": "NOT_IN_USE", "robot_id": "5", "timestamp": "2026-06-25 14:32:42", "x_begin_mm": "1500", "x_end_mm": "1980", "y_begin_mm": "3797", "y_end_mm": "4497"}
-````
+- total=392
 
+| column | latest | latest | sample | sample | sample |
+|---|---|---|---|---|---|
+| batch_id | 214 | 215 | 12 | 1124 | 11 |
+| box_id | 32000246 | 32000246 | 17000123 | 17000001 | 32000012 |
+
+## Columns
+
+- batch_id: 176 distinct, int 5..214
+  - top_values: 204=22, 143=8, 147=8, 198=8, 141=7, 60=6, 67=6, 73=6, 169=6, 170=6
+- box_id: 175 distinct, int 17000038..32005989
+  - top_values: 17000231=17, 17000217=16, 32000019=14, 17000247=13, 32000480=12, 32000121=9, 32001095=7, 32001155=7, 32000057=6, 32001162=6
+
+# batch_port
+
+## All rows
+
+| column | row 1 | row 2 | row 3 | row 4 | row 5 | row 6 | row 7 |
+|---|---|---|---|---|---|---|---|
+| id | 5 | 6 | 7 | 8 | 9 | 10 | 11 |
+| batch_id | 12 | 12 | 15 | 16 | 17 | 20 | 20 |
+| port_short_id | 1 | 2 | 1 | 2 | 2 | 1 | 2 |
+
+```
 
 ## Implementation
 This can be automated using [python implementation](python_impl.md)
