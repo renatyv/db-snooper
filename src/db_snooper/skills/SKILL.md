@@ -13,6 +13,7 @@ Use this skill to generate a compact, LLM-ready schema and data profile of an ex
 - Use when the user asks to profile a database, generate schema context, understand table structures, column meanings, data types, or value distributions.
 - Use before generating SQL from natural language, so the SQL agent knows the real schema and data shapes.
 - Use when debugging a query and the table/column meanings or formats are unclear.
+- Use when the data lives in files (parquet, JSON/JSONL, CSV/TSV, Arrow, ...) rather than a database: load them into DuckDB first (see [Profiling Files](#profiling-files-parquet-json-csv-arrow-)), then profile.
 - Do not use this as a full data export tool.
 - Do not perform destructive database operations.
 
@@ -36,6 +37,13 @@ uvx db-snooper profile -h
 For frequent use, install once with `uv tool install db-snooper` and run `db-snooper ...` directly.
 
 The generated profile (`<database>/<schema>.md`) contains `CREATE TABLE` DDL with indexes/constraints, total row counts, sampled rows, and per-column null/distinct/range/median/top-value summaries — sensitive columns are redacted and very large tables use internal stats only.
+
+## Profiling Files (Parquet, JSON, CSV, Arrow, ...)
+
+DuckDB reads many file formats directly — parquet, JSON/JSONL, CSV/TSV, Arrow/Feather, Iceberg, and more. Because db-snooper already supports DuckDB, you profile any of these files by loading them into a DuckDB database as tables, then profiling that database. No separate tooling or per-format handling is needed.
+
+1. Load the files into a DuckDB database
+2. Profile the DuckDB database
 
 ## Enriching Table And Column Descriptions
 

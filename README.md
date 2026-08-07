@@ -72,6 +72,15 @@ db-snooper profile --db-type mariadb --database app_db --user readonly_user --ho
 db-snooper profile --db-type duckdb --database warehouse.duckdb --schema sch
 ```
 
+### Files (Parquet, JSON, CSV, ...) via DuckDB
+
+DuckDB reads many file formats directly (parquet, JSON/JSONL, CSV/TSV, Arrow, Iceberg, ...), so profile a file by loading it into a DuckDB database as a table, then profiling that database.
+
+```bash
+duckdb warehouse.duckdb -c "CREATE TABLE sales AS SELECT * FROM read_parquet('sales.parquet')"
+db-snooper profile --db-type duckdb --database warehouse.duckdb
+```
+
 ## Environment Variables
 
 Connection values can come from environment variables instead of flags:
