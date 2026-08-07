@@ -86,6 +86,21 @@ def profile_column(
     )
     sensitive = is_sensitive(column.name)
 
+    # Low-cardinality columns: fetch the full histogram up front so the
+    # value=count pairs can be inlined into the column header (replacing the
+    # "N distinct" label) and so average/median can be skipped for numeric
+    # columns, where the counts already are the precise distribution.
+    full_histogram: list[tuple[Any, int]] | None = None
+    if (
+        not sensitive
+        and not unique_identifier
+        and distinct_supported
+        and distinct_count is not None
+        and distinct_count < 20
+    ):
+        with query_timeout.metric(conn, skipped, "value counts"):
+            full_histogram = get_value_counts(conn, table, column, limit=None)
+
     # Numeric min/max is computed first so the range can be inlined on the
     # column header (``int 5..214``); average/median and any catalog-range
     # fallback are emitted as a supplementary ``stats`` sub-bullet.
@@ -115,7 +130,13 @@ def profile_column(
                 f"max≈{format_value(catalog_stat.max_value)}"
             )
         col_name = str(column.name)
-        include_avg_median = col_name != "id" and not col_name.endswith("_id")
+        include_avg_median = (
+            col_name != "id"
+            and not col_name.endswith("_id")
+            # The full histogram is the exact distribution, so average/median
+            # would only restate it.
+            and full_histogram is None
+        )
         if include_avg_median:
             if total_rows <= 1_000_000 or (total_rows <= 10_000_000 and indexed):
                 with query_timeout.metric(conn, skipped, "average"):
@@ -131,7 +152,11 @@ def profile_column(
     summary: list[str] = []
     if unique_identifier:
         summary.append("unique identifier")
-    if distinct_count is not None:
+    if full_histogram is not None:
+        # The histogram inlines the distribution; "N distinct" is implied, so
+        # it is omitted to avoid restating the obvious.
+        summary.append(format_value_counts(full_histogram))
+    elif distinct_count is not None:
         summary.append(f"{distinct_count} distinct")
     elif catalog_stat is not None and catalog_stat.distinct is not None:
         summary.append(f"≈{catalog_stat.distinct} distinct")
@@ -144,7 +169,10 @@ def profile_column(
         catalog_nulls = round(catalog_stat.null_frac * total_rows)
         if catalog_nulls > 0:
             summary.append(f"nulls≈{catalog_nulls}")
-    if numeric_range:
+    # The min..max range is redundant when the full histogram already lists
+    # every value: with two distinct values the range endpoints are exactly
+    # those two values, so the range just restates them.
+    if numeric_range and (full_histogram is None or len(full_histogram) > 2):
         summary.append(numeric_range)
     lines = [
         f"- {column.name}: {', '.join(summary) if summary else 'profile metrics skipped'}"
@@ -154,12 +182,9 @@ def profile_column(
 
     if not sensitive and not unique_identifier and distinct_supported:
         top_values: list[tuple[Any, int]] = []
-        if distinct_count is not None and distinct_count < 20:
-            with query_timeout.metric(conn, skipped, "value counts"):
-                top_values = get_value_counts(conn, table, column, limit=None)
-                lines.append(
-                    continuation_line("values", format_value_counts(top_values))
-                )
+        if full_histogram is not None:
+            # Already inlined on the column header; no separate line.
+            top_values = full_histogram
         elif total_rows <= 100_000 and indexed:
             with query_timeout.metric(conn, skipped, "top values"):
                 top_values = get_value_counts(conn, table, column, limit=10)

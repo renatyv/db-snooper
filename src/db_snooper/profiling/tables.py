@@ -35,9 +35,9 @@ OBJECT_TABLE = "table"
 OBJECT_VIEW = "view"
 OBJECT_MATERIALIZED_VIEW = "materialized_view"
 
-# Sampled-row counts for tables above the small-table threshold: a couple of the
-# most recent rows plus a few random ones, rendered together in one table.
-LATEST_ROW_LIMIT = 2
+# Sampled-row counts for tables above the small-table threshold: the most recent
+# row plus a few random ones, rendered together in one table.
+LATEST_ROW_LIMIT = 1
 RANDOM_ROW_LIMIT = 3
 
 # Section headings emitted inside each table profile. The table name is the
@@ -254,14 +254,51 @@ def get_sqlite_ddl(conn: Connection, table_name: str) -> TableDdl:
     return TableDdl(create_table=create_table, indexes=indexes)
 
 
+# Matches a secondary/unique/fulltext/spatial index definition and captures its
+# leading keyword (e.g. ``UNIQUE ``) so the generated index name can be dropped
+# while keeping the indexed column list. ``PRIMARY KEY`` and ``CONSTRAINT ...
+# FOREIGN KEY`` are not matched: no name sits between their ``KEY`` and ``(``.
+_MYSQL_INDEX_NAME_RE = re.compile(
+    r"\b((?:UNIQUE|FULLTEXT|SPATIAL)\s+)?KEY\s+(?:`[^`]+`|\w+)(?=\s*\()",
+    re.IGNORECASE,
+)
+
+
+def _strip_mysql_noise(sql: str) -> str:
+    """Normalize a MySQL ``SHOW CREATE TABLE`` statement for compact LLM context.
+
+    Strips engine-specific noise: the no-op ``DEFAULT NULL`` column default,
+    column/table ``CHARACTER SET``/``CHARSET`` and ``COLLATE``/``COLLATION``
+    clauses, the ``ENGINE=`` table option, and the generated names on secondary
+    and unique indexes (``KEY name (cols)`` -> ``KEY (cols)``). Primary keys,
+    foreign keys (with their constraint names), ``UNIQUE`` constraints, and the
+    indexed column lists are all preserved.
+    """
+    sql = re.sub(r"\s+DEFAULT\s+NULL\b", "", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"\s+CHARACTER\s+SET\s+\w+", "", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"\s+COLLATE\s+\w+", "", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"\s*ENGINE\s*=\s*\w+", "", sql, flags=re.IGNORECASE)
+    sql = re.sub(
+        r"\s*(?:DEFAULT\s+)?CHARSET\s*=\s*\w+", "", sql, flags=re.IGNORECASE
+    )
+    sql = re.sub(
+        r"\s*(?:DEFAULT\s+)?COLL(?:ATE|ATION)\s*=\s*\w+", "", sql, flags=re.IGNORECASE
+    )
+    sql = _MYSQL_INDEX_NAME_RE.sub(r"\1KEY", sql)
+    return sql
+
+
 def get_mysql_ddl(conn: Connection, table: Table) -> TableDdl:
     quoted_table = conn.dialect.identifier_preparer.format_table(table)
     row = conn.exec_driver_sql(f"SHOW CREATE TABLE {quoted_table}").first()
     if row is None:
         return TableDdl(create_table=[], indexes=[])
     # MySQL embeds secondary indexes (KEY/UNIQUE KEY) inside CREATE TABLE, so
-    # there are no separate index statements to extract.
-    return TableDdl(create_table=[ensure_semicolon(str(row[1]))], indexes=[])
+    # there are no separate index statements to extract. SHOW CREATE TABLE also
+    # pads the statement with engine-specific noise (DEFAULT NULL, ENGINE,
+    # CHARSET, COLLATE, generated index names); strip it for a compact profile.
+    create_table = _strip_mysql_noise(str(row[1]))
+    return TableDdl(create_table=[ensure_semicolon(create_table)], indexes=[])
 
 
 def get_reflected_ddl(conn: Connection, table: Table) -> TableDdl:
@@ -485,7 +522,7 @@ def profile_table(
             columns_lines=[],
         )
 
-    # Larger table: total + 2 latest + 3 random rows in one transposed table,
+    # Larger table: total + 1 latest + 3 random rows in one transposed table,
     # then per-column profiles.
     rows_lines = [f"- total={total_rows}"]
     latest: list[dict[str, Any]] = []
