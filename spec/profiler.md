@@ -41,6 +41,15 @@ For each table:
 ## Result example
 
 ````markdown
+# Relationships
+
+- dive_sim.batch_box_association
+  - batch_id → dive_sim.batch.id
+  - box_id → dive_sim.box.id
+- dive_sim.batch_port
+  - batch_id → dive_sim.batch.id
+  - port_short_id → dive_sim.port.short_id
+
 # batch_box_association
 
 ```sql
