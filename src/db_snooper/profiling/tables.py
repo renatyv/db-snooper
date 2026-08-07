@@ -35,6 +35,34 @@ OBJECT_TABLE = "table"
 OBJECT_VIEW = "view"
 OBJECT_MATERIALIZED_VIEW = "materialized_view"
 
+# Sampled-row counts for tables above the small-table threshold: a couple of the
+# most recent rows plus a few random ones, rendered together in one table.
+LATEST_ROW_LIMIT = 2
+RANDOM_ROW_LIMIT = 3
+
+# Section headings emitted inside each table profile. The table name is the
+# top-level heading, so these nest one level below it.
+ROWS_HEADING = "## Rows"
+ALL_ROWS_HEADING = "## All rows"
+COLUMNS_HEADING = "## Columns"
+INDEXES_HEADING = "## Indexes"
+
+
+@dataclass
+class TableProfile:
+    """Structured profile for a single table, split into renderable sections.
+
+    ``rows_heading``/``rows_lines`` carry the sampled-rows section (``## Rows``
+    for larger tables with a total + latest/sample table, ``## All rows`` for
+    small tables that dump every row). ``columns_lines`` carries the per-column
+    profile section (``## Columns``); it is empty for small tables and for
+    tables whose column profiling was skipped.
+    """
+
+    rows_heading: str | None
+    rows_lines: list[str]
+    columns_lines: list[str]
+
 
 @dataclass
 class TableDdl:
@@ -303,20 +331,24 @@ def resolve_table_size(
 
 def profile_table_from_stats(
     conn: Connection, table: Table, estimate: int
-) -> list[str]:
+) -> TableProfile:
     # The table is too large to scan, but its catalog stats are free. Emit a
     # per-column summary derived entirely from those stats.
-    lines = [
-        f"- total rows≈{estimate} "
-        "(estimated from db stats; row/column profiling skipped)"
+    rows_lines = [
+        f"- total≈{estimate} (estimated from db stats; row/column profiling skipped)"
     ]
+    columns_lines: list[str] = []
     catalog = get_catalog_column_stats(conn, table, estimate)
     for column in table.columns:
         stat = catalog.get(column.name)
         if stat is None:
             continue
-        lines.extend(_catalog_column_lines(column, stat, estimate))
-    return lines
+        columns_lines.extend(_catalog_column_lines(column, stat, estimate))
+    return TableProfile(
+        rows_heading=ROWS_HEADING,
+        rows_lines=rows_lines,
+        columns_lines=columns_lines,
+    )
 
 
 def _catalog_column_lines(column: Any, stat: Any, estimate: int) -> list[str]:
@@ -358,26 +390,49 @@ def _catalog_column_lines(column: Any, stat: Any, estimate: int) -> list[str]:
     return lines
 
 
-def _format_rows_block(
-    label: str, rows: list[dict[str, Any]]
+def _format_cell(value: Any) -> str:
+    """Render a sampled value as a markdown-table cell.
+
+    ``None`` becomes ``null``; booleans become lowercase ``true``/``false``;
+    containers use compact JSON. Pipes are escaped and newlines collapsed so a
+    value can never break the surrounding table row.
+    """
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (dict, list)):
+        try:
+            text = json_dumps(value)
+        except (TypeError, ValueError):
+            text = str(value)
+    else:
+        text = format_value(value)
+    return str(text).replace("|", "\\|").replace("\n", " ")
+
+
+def _format_rows_table(
+    column_names: list[str],
+    rows: list[dict[str, Any]],
+    column_labels: list[str],
 ) -> list[str]:
-    """Format sampled rows as a labelled, line-broken JSON array.
+    """Render sampled rows as a transposed markdown table.
 
-    The array stays valid JSON (no trailing comma) while putting each row on its
-    own indented line for readability::
-
-        - <label>: [
-          {...},
-          {...}
-        ]
+    Each table column becomes a row; each sampled row becomes a column. The
+    first header cell is ``column`` and the rest are ``column_labels`` (e.g.
+    ``latest``/``sample`` for larger tables or ``row 1``..``row N`` for small
+    tables that dump every row).
     """
     if not rows:
-        return [f"- {label}: []"]
-    lines = [f"- {label}: ["]
-    for index, row in enumerate(rows):
-        suffix = "" if index == len(rows) - 1 else ","
-        lines.append(f"  {json_dumps(row)}{suffix}")
-    lines.append("]")
+        return ["- (no rows sampled)"]
+    width = 1 + len(column_labels)
+    lines = [
+        "| column | " + " | ".join(column_labels) + " |",
+        "|" + "|".join(["---"] * width) + "|",
+    ]
+    for name in column_names:
+        cells = [_format_cell(row.get(name)) for row in rows]
+        lines.append(f"| {name} | " + " | ".join(cells) + " |")
     return lines
 
 
@@ -387,47 +442,66 @@ def profile_table(
     options: ProfileOptions,
     report_column: Callable[[str], None] | None = None,
     size_info: TableSizeInfo | None = None,
-) -> list[str]:
+) -> TableProfile:
     if size_info is None:
         size_info = resolve_table_size(conn, table, options)
     if size_info.is_large:
         return profile_table_from_stats(conn, table, size_info.estimate)
     if size_info.timed_out:
-        return [f"- {table.name}: skipped (row count query timeout)"]
+        return TableProfile(
+            rows_heading=None,
+            rows_lines=[f"- {table.name}: skipped (row count query timeout)"],
+            columns_lines=[],
+        )
     total_rows = size_info.total_rows
     if total_rows is None:
         # Unreachable: is_large/timed_out return early above.
-        return [f"- {table.name}: skipped (row count unavailable)"]
+        return TableProfile(
+            rows_heading=None,
+            rows_lines=[f"- {table.name}: skipped (row count unavailable)"],
+            columns_lines=[],
+        )
+
+    column_names = [column.name for column in table.columns]
+
     if total_rows <= options.small_table_threshold:
-        if total_rows <= options.sample_row_limit:
-            # Every row is listed below, so the rows themselves expose both the
-            # count and the schema: the CREATE TABLE is omitted and no row count
-            # is printed. The table name is the section heading (emitted by the
-            # caller), so lead only with the "all rows" marker.
-            label = "all rows"
-        else:
-            # More rows than the sample cap: only the first rows are listed, so
-            # keep the total count. The CREATE TABLE above already names the
-            # table.
-            label = f"first {options.sample_row_limit} of {total_rows} rows"
         sampled: list[dict[str, Any]] = []
         with query_timeout.metric(conn, [], "sampled rows"):
             sampled = sample_rows(conn, table, options.sample_row_limit)
-        return _format_rows_block(label, sampled)
+        labels = [f"row {index + 1}" for index in range(len(sampled))]
+        rows_lines = _format_rows_table(column_names, sampled, labels)
+        # When every row fits, the rows alone expose the count and schema, so no
+        # total is printed and the section is labelled "All rows". A partial
+        # dump (sample cap below the small-table threshold) keeps the total.
+        if sampled and len(sampled) >= total_rows:
+            return TableProfile(
+                rows_heading=ALL_ROWS_HEADING,
+                rows_lines=rows_lines,
+                columns_lines=[],
+            )
+        return TableProfile(
+            rows_heading=ROWS_HEADING,
+            rows_lines=[f"- total={total_rows}", "", *rows_lines],
+            columns_lines=[],
+        )
 
-    # The table name is the section heading (emitted by the caller), so it
-    # is not repeated here. Each sample is a labelled, line-broken JSON array
-    # for readability.
-    lines = [f"- total rows={total_rows}"]
+    # Larger table: total + 2 latest + 3 random rows in one transposed table,
+    # then per-column profiles.
+    rows_lines = [f"- total={total_rows}"]
     latest: list[dict[str, Any]] = []
     with query_timeout.metric(conn, [], "latest rows"):
-        latest = latest_rows(conn, table, 3)
-    lines.extend(_format_rows_block("latest rows", latest))
-
+        latest = latest_rows(conn, table, LATEST_ROW_LIMIT)
     random_sample: list[dict[str, Any]] = []
     with query_timeout.metric(conn, [], "random rows"):
-        random_sample = random_rows(conn, table, 5)
-    lines.extend(_format_rows_block("random rows sample", random_sample))
+        random_sample = random_rows(conn, table, RANDOM_ROW_LIMIT)
+
+    combined = list(latest) + list(random_sample)
+    labels = ["latest"] * len(latest) + ["sample"] * len(random_sample)
+    rows_lines.append("")
+    if combined:
+        rows_lines.extend(_format_rows_table(column_names, combined, labels))
+    else:
+        rows_lines.append("- (no rows sampled)")
 
     unique_columns = get_unique_column_names(table)
     indexed_columns = get_indexed_column_names(table)
@@ -439,10 +513,11 @@ def profile_table(
         if total_rows > 100_000
         else {}
     )
+    columns_lines: list[str] = []
     for column in table.columns:
         if report_column is not None:
             report_column(column.name)
-        lines.extend(
+        columns_lines.extend(
             profile_column(
                 conn,
                 table,
@@ -454,7 +529,11 @@ def profile_table(
                 catalog_stat=catalog_stats.get(column.name),
             )
         )
-    return lines
+    return TableProfile(
+        rows_heading=ROWS_HEADING,
+        rows_lines=rows_lines,
+        columns_lines=columns_lines,
+    )
 
 
 def sample_rows(conn: Connection, table: Table, limit: int) -> list[dict[str, Any]]:

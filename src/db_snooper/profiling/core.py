@@ -12,10 +12,13 @@ from db_snooper import __version__, query_timeout
 from db_snooper.permissions import PermissionReport, check_permissions, format_warnings
 from db_snooper.profiling.models import ProfileOptions, ProfileProgress
 from db_snooper.profiling.tables import (
+    COLUMNS_HEADING,
+    INDEXES_HEADING,
     OBJECT_MATERIALIZED_VIEW,
     OBJECT_TABLE,
     OBJECT_VIEW,
     TableDdl,
+    TableProfile,
     get_table_ddl,
     profile_table,
     resolve_table_size,
@@ -185,7 +188,7 @@ def profile_database(
                     progress(index, len(tables), table_name)
                 continue
 
-            lines.append(f"## {table_name}")
+            lines.append(f"# {table_name}")
             lines.append("")
 
             # When every row is listed below, the CREATE TABLE is redundant: the
@@ -256,9 +259,10 @@ def profile_database(
                 lines.append("```")
                 lines.append("")
                 if ddl.indexes:
-                    lines.append("- indexes:")
+                    lines.append(INDEXES_HEADING)
+                    lines.append("")
                     for index_ddl in ddl.indexes:
-                        lines.append(f"  - {index_ddl}")
+                        lines.append(f"- {index_ddl}")
                     lines.append("")
 
             if table is None:
@@ -266,6 +270,7 @@ def profile_database(
                     f"- {table_name}: column profiling skipped "
                     "(schema via utility fallback)"
                 )
+                lines.append("")
             else:
 
                 def report_column(column_name: str) -> None:
@@ -274,15 +279,15 @@ def profile_database(
                             index - 1, len(tables), f"{table_name} ({column_name})"
                         )
 
+                table_profile: TableProfile | None = None
                 try:
-                    table_prodile_strings = profile_table(
+                    table_profile = profile_table(
                         conn,
                         table,
                         options,
                         report_column=report_column,
                         size_info=size_info,
                     )
-                    lines.extend(table_prodile_strings)
                 except Exception as exc:
                     _logger.warning(
                         "Skipped table '%s': could not generate profile (%s: %s)",
@@ -291,7 +296,19 @@ def profile_database(
                         exc,
                     )
                     failed_profile_tables.append(table_name)
-            lines.append("")
+
+                if table_profile is not None:
+                    if table_profile.rows_heading:
+                        lines.append(table_profile.rows_heading)
+                        lines.append("")
+                    if table_profile.rows_lines:
+                        lines.extend(table_profile.rows_lines)
+                        lines.append("")
+                    if table_profile.columns_lines:
+                        lines.append(COLUMNS_HEADING)
+                        lines.append("")
+                        lines.extend(table_profile.columns_lines)
+                        lines.append("")
             lines.append("")
             if progress is not None:
                 progress(index, len(tables), table_name)

@@ -40,12 +40,6 @@ For each table:
 
 ## Result example
 
-Single profile for a schema `main` in database `dive_sim`
-
-`dive_sim/main.md`
-
-Each table emits its own `## table_name` section with `CREATE TABLE` DDL in a fenced `sql` block followed by its profile. Small tables that dump every row omit the DDL (the rows already expose the schema); empty tables are skipped entirely and listed in a trailing summary.
-
 ````markdown
 # batch_box_association
 

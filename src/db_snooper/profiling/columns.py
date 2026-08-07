@@ -86,39 +86,22 @@ def profile_column(
     )
     sensitive = is_sensitive(column.name)
 
-    summary = []
-    if unique_identifier:
-        summary.append("unique identifier")
-    if non_nulls is not None:
-        summary.extend((f"nulls={nulls}", f"non_nulls={non_nulls}"))
-    elif catalog_stat is not None and catalog_stat.null_frac is not None:
-        # Exact count skipped (table too large/unindexed, or query timed out);
-        # fall back to the catalog null fraction.
-        catalog_nulls = round(catalog_stat.null_frac * total_rows)
-        summary.extend(
-            (f"nulls≈{catalog_nulls}", f"non_nulls≈{total_rows - catalog_nulls}")
-        )
-    if distinct_count is not None:
-        summary.append(f"distinct={distinct_count}")
-    elif catalog_stat is not None and catalog_stat.distinct is not None:
-        summary.append(f"distinct≈{catalog_stat.distinct}")
-    lines = [
-        f"- {column.name}: {', '.join(summary) if summary else 'profile metrics skipped'}"
-    ]
-
+    # Numeric min/max is computed first so the range can be inlined on the
+    # column header (``int 5..214``); average/median and any catalog-range
+    # fallback are emitted as a supplementary ``stats`` sub-bullet.
+    numeric_range: str | None = None
+    numeric_stats: list[str] = []
     if is_numeric(column):
-        numeric = []
         have_range = False
         if total_rows <= 5_000_000 or indexed:
             with query_timeout.metric(conn, skipped, "min/max"):
                 min_value, max_value = query_timeout.execute(
                     conn, select(func.min(column), func.max(column)).select_from(table)
                 ).one()
-                numeric.extend(
-                    (
-                        f"min={format_value(min_value)}",
-                        f"max={format_value(max_value)}",
-                    )
+            if min_value is not None and max_value is not None:
+                numeric_range = (
+                    f"{numeric_type_word(column)} "
+                    f"{format_value(min_value)}..{format_value(max_value)}"
                 )
                 have_range = True
         if (
@@ -127,11 +110,9 @@ def profile_column(
             and catalog_stat.min_value is not None
             and catalog_stat.max_value is not None
         ):
-            numeric.extend(
-                (
-                    f"min≈{format_value(catalog_stat.min_value)}",
-                    f"max≈{format_value(catalog_stat.max_value)}",
-                )
+            numeric_stats.append(
+                f"min≈{format_value(catalog_stat.min_value)}, "
+                f"max≈{format_value(catalog_stat.max_value)}"
             )
         col_name = str(column.name)
         include_avg_median = col_name != "id" and not col_name.endswith("_id")
@@ -141,13 +122,35 @@ def profile_column(
                     average = query_timeout.execute(
                         conn, select(func.avg(column)).select_from(table)
                     ).scalar_one()
-                    numeric.append(f"average={format_value(average)}")
+                    numeric_stats.append(f"average={format_value(average)}")
             if total_rows < 100_000:
                 with query_timeout.metric(conn, skipped, "median"):
                     median = median_value(conn, table, column)
-                    numeric.append(f"median={format_value(median)}")
-        if numeric:
-            lines.append(continuation_line("numeric", ", ".join(numeric)))
+                    numeric_stats.append(f"median={format_value(median)}")
+
+    summary: list[str] = []
+    if unique_identifier:
+        summary.append("unique identifier")
+    if distinct_count is not None:
+        summary.append(f"{distinct_count} distinct")
+    elif catalog_stat is not None and catalog_stat.distinct is not None:
+        summary.append(f"≈{catalog_stat.distinct} distinct")
+    if nulls is not None:
+        if nulls > 0:
+            summary.append(f"nulls={nulls}")
+    elif catalog_stat is not None and catalog_stat.null_frac is not None:
+        # Exact count skipped (table too large/unindexed, or query timed out);
+        # fall back to the catalog null fraction.
+        catalog_nulls = round(catalog_stat.null_frac * total_rows)
+        if catalog_nulls > 0:
+            summary.append(f"nulls≈{catalog_nulls}")
+    if numeric_range:
+        summary.append(numeric_range)
+    lines = [
+        f"- {column.name}: {', '.join(summary) if summary else 'profile metrics skipped'}"
+    ]
+    if numeric_stats:
+        lines.append(continuation_line("stats", ", ".join(numeric_stats)))
 
     if not sensitive and not unique_identifier and distinct_supported:
         top_values: list[tuple[Any, int]] = []
@@ -338,6 +341,13 @@ def value_shape(value: str) -> str | None:
 
 def is_numeric(column: Any) -> bool:
     return isinstance(column.type, (Integer, BigInteger, SmallInteger, Numeric, Float))
+
+
+def numeric_type_word(column: Any) -> str:
+    """Short type label for inline numeric ranges: ``int`` vs ``num``."""
+    if isinstance(column.type, (Integer, BigInteger, SmallInteger)):
+        return "int"
+    return "num"
 
 
 def is_json(column: Any) -> bool:
