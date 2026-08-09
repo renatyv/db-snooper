@@ -461,7 +461,15 @@ def is_identifier_name(column_name: str) -> bool:
 
 
 def format_value_counts(values: list[tuple[Any, int]]) -> str:
-    return ", ".join(f"{format_value(value)}={count}" for value, count in values)
+    parts = []
+    for value, count in values:
+        text = format_value(value)
+        if isinstance(value, str):
+            # Quote strings so they are distinguishable from numbers and from
+            # the value separator, and can't run into the count that follows.
+            text = f'"{text}"'
+        parts.append(f"{text}={count}")
+    return ", ".join(parts)
 
 
 def continuation_line(label: str, body: str) -> str:
