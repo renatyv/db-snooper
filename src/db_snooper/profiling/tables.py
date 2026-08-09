@@ -134,23 +134,32 @@ def collect_relationships(
 def format_relationships(
     relationships: list[Relationship], schema: str | None
 ) -> list[str]:
-    """Render relationships as sorted ``- child.col → parent.col`` bullets.
+    """Render foreign keys as ``- parent.col ← child.col`` bullets.
 
-    Composite keys render as ``child.(c1, c2) → parent.(c1, c2)``. The parent
-    table is schema-qualified only when it lives in a different schema than the
-    one being profiled, keeping the common single-schema case compact.
+    The parent (referenced) column leads each line and the arrow points back
+    at the children that reference it, so a column referenced by many tables
+    reads as ``- parent.col ← child1.col, child2.col``. The arrow always
+    points parent ← child regardless of how many children there are, keeping
+    the section's direction consistent. Lines are sorted by parent, turning
+    the section into an index of "what references each parent column".
+
+    Composite keys render as ``table.(c1, c2)``. The parent table is
+    schema-qualified only when it lives in a different schema than the one
+    being profiled, keeping the common single-schema case compact.
     """
+    groups: dict[str, list[Relationship]] = {}
+    for rel in relationships:
+        groups.setdefault(_parent_display(rel, schema), []).append(rel)
+
     lines: list[str] = []
-    for rel in sorted(
-        relationships,
-        key=lambda r: (r.constrained_table, r.constrained_columns, r.referred_table),
-    ):
-        child = _format_relationship_side(rel.constrained_table, rel.constrained_columns)
-        parent_table = rel.referred_table
-        if rel.referred_schema and rel.referred_schema != schema:
-            parent_table = f"{rel.referred_schema}.{rel.referred_table}"
-        parent = _format_relationship_side(parent_table, rel.referred_columns)
-        lines.append(f"- {child} → {parent}")
+    for parent, rels in sorted(groups.items()):
+        rels.sort(key=lambda r: (r.constrained_table, r.constrained_columns))
+        children: list[str] = []
+        for rel in rels:
+            child = _format_relationship_side(rel.constrained_table, rel.constrained_columns)
+            if child not in children:
+                children.append(child)
+        lines.append(f"- {parent} ← {', '.join(children)}")
     return lines
 
 
@@ -158,6 +167,15 @@ def _format_relationship_side(table: str, columns: tuple[str, ...]) -> str:
     if len(columns) == 1:
         return f"{table}.{columns[0]}"
     return f"{table}.({', '.join(columns)})"
+
+
+def _parent_display(rel: Relationship, schema: str | None) -> str:
+    """Render the parent (referred) side of ``rel``, schema-qualifying it only
+    when it lives outside the schema being profiled."""
+    parent_table = rel.referred_table
+    if rel.referred_schema and rel.referred_schema != schema:
+        parent_table = f"{rel.referred_schema}.{rel.referred_table}"
+    return _format_relationship_side(parent_table, rel.referred_columns)
 
 
 # Matches the ``CREATE [UNIQUE] INDEX <name> ON [<schema>.]<table>`` prefix of
