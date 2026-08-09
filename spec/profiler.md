@@ -17,9 +17,9 @@ For each table:
    - If a table has fewer than 10 rows, dump every row (the CREATE TABLE is omitted, since the rows expose the schema). Never dump values for sensitive fields. Treat column names containing `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token` as sensitive, and redact sampled rows and value profiles.
    - If a table has more than 10 rows, include the number of rows, 1 latest row, and 2 random ones. Also generate per-column profiles:
      - If a column is all `NULL`, emit a one-line `all NULL` summary.
-     - If a column is a unique identifier, omit top values and value-shape metadata.
-     - If a column has fewer than 20 distinct values, emit the full histogram inline as `value=count` pairs directly on the column line, followed by `nulls=N` (and `non_nulls=N` when informative), e.g. `- COMM_REQ_ATTRIBUTE: CIM=94, nulls=9906` or `- status: open=30, closed=20, pending=10, nulls=2`. Omit the separate `N distinct` / null-count line — the histogram already conveys the distribution. When every value is already listed, no value-shape tag is emitted (it would just repeat the obvious).
-     - For high-cardinality string columns whose individual values are not all listed, append a single `shape=<shape>` tag to the column summary when one shape (e.g. `email`, `phone`, `date-like`, `UPPER+digits`) dominates the sampled top values; otherwise omit it.
+     - If a column is a unique identifier, omit top values.
+     - If a column has fewer than 20 distinct values, emit the full histogram inline as `value=count` pairs directly on the column line, followed by `nulls=N` (and `non_nulls=N` when informative), e.g. `- COMM_REQ_ATTRIBUTE: CIM=94, nulls=9906` or `- status: open=30, closed=20, pending=10, nulls=2`. Omit the separate `N distinct` / null-count line — the histogram already conveys the distribution.
+     - When every present (non-null) value is unique, emit `all distinct` instead of `N distinct`; any nulls are reported normally, e.g. `- TERM_END_DATE: all distinct` or `- supervisor_id: all distinct, nulls=8`. This is implied by `unique identifier`, so it is omitted there.
      - If n_rows >= 20, include per-column profile data:
        - `NULL` and non-`NULL` counts. If n_rows > 5M, then compute it only if column is indexed
        - Min, max for numeric columns. If n_rows > 5M, then compute it only if column is indexed

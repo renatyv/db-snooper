@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
@@ -18,8 +17,6 @@ from sqlalchemy.sql.sqltypes import (
     LargeBinary,
     Numeric,
     SmallInteger,
-    String,
-    Text,
 )
 
 from db_snooper import query_timeout
@@ -157,7 +154,18 @@ def profile_column(
         # it is omitted to avoid restating the obvious.
         summary.append(format_value_counts(full_histogram))
     elif distinct_count is not None:
-        summary.append(f"{distinct_count} distinct")
+        # "all distinct" means every present (non-null) value is unique. The
+        # right baseline is the non-null count; we only fall back to total rows
+        # when the null/non-null query was skipped or timed out (distinct ==
+        # total then still correctly implies no nulls). Any nulls are reported
+        # normally, e.g. ``all distinct, nulls=8``. It is implied by
+        # "unique identifier", so it is suppressed there to avoid restating it.
+        distinct_base = non_nulls if non_nulls is not None else total_rows
+        if distinct_count == distinct_base:
+            if not unique_identifier:
+                summary.append("all distinct")
+        else:
+            summary.append(f"{distinct_count} distinct")
     elif catalog_stat is not None and catalog_stat.distinct is not None:
         summary.append(f"≈{catalog_stat.distinct} distinct")
     if nulls is not None:
@@ -204,10 +212,6 @@ def profile_column(
                         "top_values", format_value_counts(top_values)
                     )
                 )
-        shape_tag = dominant_shape(column, distinct_count, top_values)
-        if shape_tag:
-            lines[0] += f", shape={shape_tag}"
-
     # Type-specific profiling for container/LOB types that cannot be DISTINCTed.
     if not sensitive and not unique_identifier:
         if is_json(column):
@@ -309,59 +313,6 @@ def get_unique_column_names(table: Table) -> set[str]:
         if index.unique and len(index.columns) == 1:
             unique_columns.update(column.name for column in index.columns)
     return unique_columns
-
-
-def dominant_shape(
-    column: Any,
-    distinct_count: int | None,
-    top_values: list[tuple[Any, int]],
-) -> str | None:
-    """Return a single shape label when most sampled values share one.
-
-    This is only meaningful when the actual values are *not* already listed:
-    when every value is shown on a ``values:`` line a shape tag just repeats the
-    obvious, so it is suppressed for low-cardinality columns. Returns ``None``
-    for non-string columns and when no single shape dominates the sample.
-    """
-    if not isinstance(column.type, (String, Text)):
-        return None
-    if distinct_count is not None and distinct_count < 20:
-        # All values are already enumerated above; nothing to add.
-        return None
-    values = [value for value, _count in top_values[:10] if isinstance(value, str)]
-    if len(values) < 2:
-        return None
-    shapes: dict[str, int] = {}
-    for value in values:
-        shape = value_shape(value)
-        if shape and shape not in ("text", "empty"):
-            shapes[shape] = shapes.get(shape, 0) + 1
-    if not shapes:
-        return None
-    classified = sum(shapes.values())
-    shape, count = max(shapes.items(), key=lambda item: item[1])
-    if count >= 2 and count >= 0.6 * classified:
-        return shape
-    return None
-
-
-def value_shape(value: str) -> str | None:
-    if not value:
-        return "empty"
-    if re.fullmatch(r"[A-Z]{2,}\d+", value):
-        return "UPPER+digits"
-    if re.fullmatch(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", value):
-        return "email"
-    if re.fullmatch(r"\+?[\d .()/-]{7,}", value):
-        return "phone"
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}.*", value):
-        return "date-like"
-    # Oracle-style dates, e.g. DD-MON-YY / DD-MON-YYYY ("17-MAY-23").
-    if re.fullmatch(r"\d{1,2}-[A-Z]{3}-\d{2,4}.*", value):
-        return "date-like"
-    if re.search(r"\d", value) and re.search(r"[A-Za-z]", value):
-        return "letters+digits"
-    return "text"
 
 
 def is_numeric(column: Any) -> bool:
