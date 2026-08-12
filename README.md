@@ -7,7 +7,7 @@
 
 **Spec: [`spec/profiler.md`](spec/profiler.md)**
 
-DB Snooper generates compact, LLM-ready database context for SQL generation, query debugging, and schema exploration. Profiling alone drives state-of-the-art text-to-SQL accuracy ([Automatic Metadata Extraction for Text-to-SQL](https://arxiv.org/abs/2505.19988)). Supports SQLite, PostgreSQL, MySQL, MariaDB, and DuckDB. Requires Python ≥ 3.10.
+DB Snooper generates compact, LLM-ready database context for SQL generation, query debugging, and schema exploration. Profiling alone drives state-of-the-art text-to-SQL accuracy ([Automatic Metadata Extraction for Text-to-SQL](https://arxiv.org/abs/2505.19988)). Supports SQLite, PostgreSQL, MySQL, MariaDB, DuckDB, and Google BigQuery. Requires Python ≥ 3.10.
 
 It inspects an existing database and produces a Markdown profile (`<database>/<schema>.md`): DDL, row counts, sampled rows, and per-column summaries. Use `--per-table` for one `.md` per table.
 
@@ -71,6 +71,15 @@ db-snooper profile --db-type mariadb --database app_db --user readonly_user --ho
 ### DuckDB
 ```bash
 db-snooper profile --db-type duckdb --database warehouse.duckdb --schema sch
+```
+
+### Google BigQuery
+
+Authenticate with [Application Default Credentials](https://cloud.google.com/docs/authentication/provide-credentials-adc), then use the Google Cloud project as the database and the dataset as the schema. BigQuery query charges apply to profiling queries.
+
+```bash
+gcloud auth application-default login
+db-snooper profile --db-type bigquery --database project-id --schema dataset
 ```
 
 ### Files (Parquet, JSON, CSV, ...) via DuckDB

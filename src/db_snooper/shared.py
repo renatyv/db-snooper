@@ -62,3 +62,12 @@ def default_output_path(database: str) -> Path:
 def output_component(value: str) -> str:
     """Map database object names to a single safe output path component."""
     return re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip(".") or "unnamed"
+
+
+def bigquery_table_id(
+    project: str | None, schema: str | None, table: str
+) -> str:
+    prefix = schema if schema and "." in schema else ".".join(
+        part for part in (project, schema) if part
+    )
+    return f"{prefix}.{table}" if prefix else table

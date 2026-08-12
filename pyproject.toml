@@ -10,7 +10,8 @@ dependencies = [
     "sqlalchemy>=2.0",
     "pymysql>=1.1",
     "psycopg>=3.2",
-    "duckdb-engine>=0.13"
+    "duckdb-engine>=0.13",
+    "sqlalchemy-bigquery>=1.16",
 ]
 classifiers = [
     "License :: OSI Approved :: MIT License",

@@ -449,6 +449,8 @@ def _array_length_expr(conn: Connection, column: Any):
         return func.cardinality(column)
     if dialect == "duckdb":
         return func.len(column)
+    if dialect == "bigquery":
+        return func.array_length(column)
     # Fallback: array_length(col, 1) works on PostgreSQL-compatible dialects.
     return func.array_length(column, 1)
 

@@ -11,6 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.schema import UniqueConstraint
 
 from db_snooper.contracts import DEFAULT_LARGE_TABLE_THRESHOLD
+from db_snooper.shared import bigquery_table_id
 
 # Tables whose catalog row estimate is at/above this count are profiled from
 # internal database stats only: COUNT(*) and all per-column aggregations are
@@ -36,6 +37,8 @@ def estimate_row_count(conn: Connection, table: Table) -> int | None:
             return _duckdb_row_estimate(conn, table.name, schema)
         if dialect == "sqlite":
             return _sqlite_row_estimate(conn, table.name)
+        if dialect == "bigquery":
+            return _bigquery_row_count(conn, table.name, schema)
     except SQLAlchemyError:
         return None
     return None
@@ -106,6 +109,18 @@ def _sqlite_row_estimate(conn: Connection, table_name: str) -> int | None:
     except ValueError:
         return None
     return count if count >= 0 else None
+
+
+def _bigquery_row_count(
+    conn: Connection, table_name: str, schema: str | None
+) -> int | None:
+    try:
+        client = conn.connection.driver_connection._client
+        project = getattr(conn.dialect, "project_id", None) or client.project
+        table = client.get_table(bigquery_table_id(project, schema, table_name))
+        return int(table.num_rows)
+    except Exception:  # BigQuery client errors are not SQLAlchemy exceptions.
+        return None
 
 
 @dataclass(frozen=True)

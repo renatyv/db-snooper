@@ -35,9 +35,16 @@ def profile_schema(
     skipped_technical_tables = plan.skipped_technical_tables
     permission_report = plan.permission_report
     kinds = plan.kinds
-    database = engine.url.database or ""
+    database = (
+        engine.url.host if engine.dialect.name == "bigquery" else engine.url.database
+    ) or ""
     generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    schema_value = options.schema or engine.dialect.default_schema_name or ""
+    schema_value = (
+        options.schema
+        or getattr(engine.dialect, "dataset_id", None)
+        or engine.dialect.default_schema_name
+        or ""
+    )
     lines = [
         "---",
         "generator: db-snooper",

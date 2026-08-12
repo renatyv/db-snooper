@@ -5,6 +5,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
 
 from db_snooper.contracts import PermissionReport
+from db_snooper.shared import bigquery_table_id
 
 
 def check_permissions(
@@ -34,6 +35,9 @@ def check_permissions(
                 conn, "SELECT 1 FROM duckdb_tables() LIMIT 1"
             )
         }
+    elif dialect == "bigquery":
+        accessible, inaccessible = _check_bigquery_tables(conn, schema, table_names)
+        stats = {}
     else:
         accessible = list(table_names)
         inaccessible = []
@@ -134,6 +138,30 @@ def _check_mysql_stats(conn: Connection) -> dict[str, bool]:
             conn, "SELECT 1 FROM information_schema.COLUMN_STATISTICS LIMIT 1"
         )
     return stats
+
+
+def _check_bigquery_tables(
+    conn: Connection,
+    schema: str | None,
+    table_names: list[str],
+) -> tuple[list[str], list[tuple[str, str]]]:
+    project = getattr(conn.dialect, "project_id", None)
+    if not project or not schema:
+        return list(table_names), []
+    accessible: list[str] = []
+    inaccessible: list[tuple[str, str]] = []
+    preparer = conn.dialect.identifier_preparer
+    for table_name in table_names:
+        qualified = preparer.quote_identifier(
+            bigquery_table_id(project, schema, table_name)
+        )
+        if _probe_success(conn, f"SELECT 1 FROM {qualified} LIMIT 0"):
+            accessible.append(table_name)
+        else:
+            inaccessible.append(
+                (table_name, "SELECT privilege missing or table inaccessible")
+            )
+    return accessible, inaccessible
 
 
 def _probe_success(conn: Connection, sql: str, params: dict | None = None) -> bool:

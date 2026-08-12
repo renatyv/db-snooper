@@ -18,8 +18,9 @@ This file is informational and is not legal advice. Check each upstream project 
 | `duckdb-engine` | Required (DuckDB driver) | MIT |
 | `duckdb` | Transitive dependency of `duckdb-engine` | MIT |
 | `packaging` | Transitive dependency of `duckdb-engine` | Apache-2.0 or BSD-2-Clause |
+| `sqlalchemy-bigquery` | Required (Google BigQuery driver) | MIT |
 
-The PostgreSQL, MySQL/MariaDB, and DuckDB drivers are installed by default and are only used when connecting to their respective databases. The LGPL-licensed `psycopg` driver is a runtime dependency; SQLite needs no external driver.
+The PostgreSQL, MySQL/MariaDB, DuckDB, and Google BigQuery drivers are installed by default and are only used when connecting to their respective databases. The LGPL-licensed `psycopg` driver is a runtime dependency; SQLite needs no external driver.
 
 ## Development And Build Dependencies
 

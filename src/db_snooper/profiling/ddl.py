@@ -12,6 +12,7 @@ from db_snooper.contracts import (
     OBJECT_TABLE,
     OBJECT_VIEW,
 )
+from db_snooper.shared import bigquery_table_id
 
 
 @dataclass
@@ -61,6 +62,8 @@ def get_view_ddl(conn: Connection, table: Table, kind: str) -> TableDdl:
         return _duckdb_view_ddl(conn, table)
     if dialect_name in {"mysql", "mariadb"}:
         return _mysql_view_ddl(conn, table)
+    if dialect_name == "bigquery":
+        return _bigquery_view_ddl(conn, table, kind)
     return get_reflected_ddl(conn, table)
 
 
@@ -144,6 +147,24 @@ def _mysql_view_ddl(conn: Connection, table: Table) -> TableDdl:
         else []
     )
     return TableDdl(create_table=create_table, indexes=[])
+
+
+def _bigquery_view_ddl(conn: Connection, table: Table, kind: str) -> TableDdl:
+    client = conn.connection.driver_connection._client
+    project = getattr(conn.dialect, "project_id", None) or client.project
+    remote_table = client.get_table(
+        bigquery_table_id(project, table.schema, table.name)
+    )
+    materialized = remote_table.table_type == "MATERIALIZED_VIEW"
+    body = remote_table.mview_query if materialized else remote_table.view_query
+    qualified = conn.dialect.identifier_preparer.format_table(table)
+    keyword = "CREATE MATERIALIZED VIEW" if materialized else _view_keyword(kind)
+    return TableDdl(
+        create_table=[
+            ensure_semicolon(f"{keyword} {qualified} AS\n{body.rstrip(';')}")
+        ],
+        indexes=[],
+    )
 
 
 def get_sqlite_ddl(conn: Connection, table_name: str) -> TableDdl:

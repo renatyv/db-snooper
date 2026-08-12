@@ -9,6 +9,7 @@ from sqlalchemy import inspect
 from sqlalchemy.engine import URL, Engine
 
 DRIVER_NAMES = {
+    "bigquery": "bigquery",
     "sqlite": "sqlite",
     "postgres": "postgresql+psycopg",
     "mysql": "mysql+pymysql",
@@ -33,7 +34,10 @@ def add_connection_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--database",
         default=None,
-        help="Database name, or file path for SQLite/DuckDB. Defaults to DB_SNOOPER_DATABASE.",
+        help=(
+            "Database name, BigQuery project ID, or file path for SQLite/DuckDB. "
+            "Defaults to DB_SNOOPER_DATABASE."
+        ),
     )
     parser.add_argument(
         "--host",
@@ -86,6 +90,8 @@ def resolve_database_url(
 
     if db_type in {"sqlite", "duckdb"}:
         return URL.create(DRIVER_NAMES[db_type], database=database)
+    if db_type == "bigquery":
+        return URL.create(DRIVER_NAMES[db_type], host=database)
 
     host = _value(args, "host", "DB_SNOOPER_DB_HOST") or "localhost"
     port = (
@@ -119,6 +125,8 @@ def list_schemas(engine: Engine, selected_schema: str | None = None) -> list[str
     dialect = engine.dialect.name
     if dialect == "sqlite":
         return ["main"]
+    if dialect == "bigquery" and engine.dialect.dataset_id:
+        return [engine.dialect.dataset_id]
     if dialect in {"mysql", "mariadb"}:
         return [engine.dialect.default_schema_name or engine.url.database or "main"]
 

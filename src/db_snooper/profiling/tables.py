@@ -196,6 +196,10 @@ def resolve_table_size(
         return TableSizeInfo(
             total_rows=None, estimate=estimate, is_large=True, timed_out=False
         )
+    if conn.dialect.name == "bigquery" and estimate is not None:
+        return TableSizeInfo(
+            total_rows=estimate, estimate=estimate, is_large=False, timed_out=False
+        )
     try:
         total_rows = query_timeout.execute(
             conn, select(func.count()).select_from(table), options.query_timeout
@@ -425,7 +429,7 @@ def profile_table(
 def sample_rows(
     conn: Connection, table: Table, limit: int, timeout_seconds: int = 0
 ) -> list[dict[str, Any]]:
-    order_columns = list(table.primary_key.columns) or list(table.columns)
+    order_columns = _order_columns(conn, table)
     statement = select(table).order_by(*order_columns).limit(limit)
     return rows_for_statement(conn, table, statement, timeout_seconds)
 
@@ -433,18 +437,32 @@ def sample_rows(
 def latest_rows(
     conn: Connection, table: Table, limit: int, timeout_seconds: int = 0
 ) -> list[dict[str, Any]]:
-    order_columns = list(table.primary_key.columns) or list(table.columns)
+    order_columns = _order_columns(conn, table)
     statement = (
         select(table).order_by(*(desc(column) for column in order_columns)).limit(limit)
     )
     return rows_for_statement(conn, table, statement, timeout_seconds)
 
 
+def _order_columns(conn: Connection, table: Table) -> list[Any]:
+    columns = list(table.primary_key.columns) or list(table.columns)
+    if conn.dialect.name != "bigquery":
+        return columns
+    unsupported = {"ARRAY", "GEOGRAPHY", "JSON", "STRUCT"}
+    return [
+        column
+        for column in columns
+        if type(column.type).__name__.upper() not in unsupported
+    ]
+
+
 def random_rows(
     conn: Connection, table: Table, limit: int, timeout_seconds: int = 0
 ) -> list[dict[str, Any]]:
     random_function = (
-        func.rand() if conn.dialect.name in {"mysql", "mariadb"} else func.random()
+        func.rand()
+        if conn.dialect.name in {"bigquery", "mysql", "mariadb"}
+        else func.random()
     )
     statement = select(table).order_by(random_function).limit(limit)
     return rows_for_statement(conn, table, statement, timeout_seconds)

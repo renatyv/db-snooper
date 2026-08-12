@@ -65,7 +65,8 @@ def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
         help=(
             "Abort any profiling query that runs longer than this many seconds, skip the "
             "affected metric, and continue. 0 disables. Applies to PostgreSQL/MySQL/MariaDB "
-            f"(SQLite/DuckDB have no native support). Default {_DEFAULTS.query_timeout}."
+            "(SQLite/DuckDB/BigQuery have no native support). "
+            f"Default {_DEFAULTS.query_timeout}."
         ),
     )
     parser.add_argument(
