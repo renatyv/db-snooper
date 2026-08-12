@@ -32,18 +32,22 @@ This creates a profile at `db/sch.md`.
 The profile `.md` file contains:
 
 - Metadata (YAML frontmatter) with db-snooper version, UTC generation timestamp, SQL dialect, database name, and schema.
-- A top-level `Relationships` section listing every foreign key as `- parent.col ← child.col` bullets (composite keys as `table.(c1, c2)`), grouped so a parent referenced by many tables appears once as `- parent.col ← child1.col, child2.col`. Lines are sorted by parent. This is emitted even when a table's `CREATE TABLE` is omitted, so join hints stay available regardless of table size.
-- `CREATE TABLE` DDL, indexes, and constraints.
-- Total row counts.
-- Deterministic sampled rows for small tables.
-- Latest and random sampled rows for larger tables.
-- Per-column null, non-null, distinct, numeric range, median, top-value, and shape summaries for larger tables.
-- Catalog-derived estimates for very large tables (or metrics that are skipped on medium-large tables) from each engine's internal statistics — PostgreSQL `pg_stats`, MySQL `COLUMN_STATISTICS` histograms, and MariaDB `mysql.column_stats` — emitted with a `≈`/`(from db stats)` marker so they are distinguishable from exact values.
-- Top-level key frequencies for JSON/JSONB columns and min/avg/max element counts for ARRAY columns (when row counts allow).
-- Redacted values for sensitive column names containing `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token`.
+- A top-level `Relationships` section listing every foreign key as `- parent.col ← child.col` bullets (composite keys as `table.(c1, c2)`), grouped so a parent referenced by many tables appears once as `- parent.col ← child1.col, child2.col`. Lines are sorted by parent.
+- One compact block per non-empty table, in this fixed layout:
+  - A `# <table>  (rows=<N>)` header (the count uses the engine's row estimate — `≈N` — when available, otherwise an exact `COUNT(*)`).
+  - A flattened schema header — three one-liners derived from introspection:
+    - `columns:` — one token per column as `name(type[,flags])`. Flags (emitted only when they apply): `PK`, `UNIQ` (single-column unique), `NOTNULL`, `FK`. Example: `id(bigserial,PK), email(varchar255,UNIQ,NOTNULL), user_id(bigint,FK)`.
+    - `indexes:` — parenthesized column lists, multi-column indexes keep their order, partial indexes append `WHERE <predicate>`. The primary-key index is not repeated. `none` when there are no non-PK indexes.
+    - `fk:` — `col→ref_table.ref_col` (composite FKs as `(c1,c2)→ref_table.(r1,r2)`). `none` when there are none.
+  - A `values:` block with one inline line per column — distinct counts, full histograms for low-cardinality columns, null fractions, numeric ranges (`int`/`float`/`numeric min..max`), average/median, and top values all sit on that single line. High-cardinality free-text/JSON/blob columns are annotated `← dropped from samples`.
+  - A `samples:` block — a transposed markdown table (one row per column, columns `latest | sample | sample`) showing 1 latest row and 2 random rows for the columns whose concrete values add information.
+- Tables with fewer than 10 rows emit `all rows:` (listing every row) in place of `samples:`, and still include a `values:` block when any column has a useful profile.
+- Views and materialized views emit their `CREATE VIEW` DDL (their SELECT definition) in place of the flattened header lines.
+- Catalog-derived estimates for very large tables (hundreds of millions of rows or more) from each engine's internal statistics — PostgreSQL `pg_stats`, MySQL `COLUMN_STATISTICS` histograms, and MariaDB `mysql.column_stats` — emitted with `≈` markers and a trailing `(from db stats)` tag so they are distinguishable from exact values.
+- Top-level key frequencies for JSON/JSONB columns and min/avg/max element counts for ARRAY columns (when row counts allow), rendered as trailing annotations on the column's `values:` line.
+- Redacted values for sensitive column names containing `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token` — the column appears in `values:` with `redacted` and is excluded from samples.
 - A `skipped_technical_tables` entry in the frontmatter naming migration/framework tables excluded from the profile.
-- Empty tables are skipped by default (no DDL, no rows). A `- Skipped N empty table(s):` bullet names them; the Python API can include them when needed.
-- For small tables whose rows are all listed, the `CREATE TABLE` is omitted — the row data already exposes columns, types, and constraints.
+- Empty tables are skipped by default. A `- Skipped N empty table(s):` bullet names them; the Python API's `ProfileOptions(include_empty_tables=True)` includes them (emitting only the flattened `columns:` line, with no `values:`/`samples:`).
 
 ## Database Examples
 

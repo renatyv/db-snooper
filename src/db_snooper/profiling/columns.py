@@ -19,6 +19,7 @@ from sqlalchemy.sql.sqltypes import (
 )
 
 from db_snooper import query_timeout
+from db_snooper.profiling.models import ColumnProfile
 from db_snooper.shared import is_sensitive
 
 # JSON/JSONB profiling gates: keep key extraction bounded so a single oversized
@@ -37,7 +38,26 @@ def profile_column(
     indexed_columns: set[str],
     timeout_seconds: int,
     catalog_stat: Any = None,
-) -> list[str]:
+) -> ColumnProfile:
+    """Profile a single column and return its inline ``values:`` line.
+
+    All metrics for the column — distinct count, full histogram, nulls, numeric
+    range, average/median, top values, JSON/array summaries, skip reasons —
+    collapse onto :attr:`ColumnProfile.value_line` as a single comma-separated
+    string. The one-line-per-column rendering is what the compact output format
+    requires; there are no indented continuation lines.
+    """
+    sensitive = is_sensitive(column.name)
+    if sensitive:
+        # Never dump values for sensitive fields: emit ``redacted`` and stop.
+        return ColumnProfile(
+            name=column.name,
+            value_line="redacted",
+            is_sensitive=True,
+            is_unique_identifier=False,
+            dropped_from_samples=False,
+        )
+
     indexed = column.name in indexed_columns
     counts_available = total_rows <= 5_000_000 or indexed
     non_nulls: int | None = None
@@ -55,9 +75,7 @@ def profile_column(
         if non_nulls is not None:
             nulls = total_rows - non_nulls
             if non_nulls == 0:
-                lines = [f"- {column.name}: all NULL"]
-                lines.extend(skipped_metric_lines(skipped))
-                return lines
+                return _column_profile(column, "all NULL", skipped=skipped)
 
     distinct_supported = is_distinct_supported(column)
     distinct_available = distinct_supported and (
@@ -65,7 +83,6 @@ def profile_column(
         or total_rows <= 100_000
         or (total_rows <= 1_000_000 and indexed)
     )
-    sensitive = is_sensitive(column.name)
     distinct_count: int | None = None
     approximate_top_values: list[tuple[Any, int]] = []
     if distinct_available:
@@ -102,10 +119,9 @@ def profile_column(
         and is_identifier_name(column.name)
     )
     # Low-cardinality columns: fetch the full (or BigQuery approximate) histogram
-    # up front so the
-    # value=count pairs can be inlined into the column header (replacing the
-    # "N distinct" label) and so average/median can be skipped for numeric
-    # columns, where the counts already are the precise distribution.
+    # up front so the value=count pairs can be inlined into the value line
+    # (replacing the "N distinct" label) and so average/median can be skipped
+    # for numeric columns, where the counts already are the precise distribution.
     full_histogram: list[tuple[Any, int]] | None = None
     if (
         not sensitive
@@ -122,9 +138,8 @@ def profile_column(
                     conn, table, column, limit=None, timeout_seconds=timeout_seconds
                 )
 
-    # Numeric min/max is computed first so the range can be inlined on the
-    # column header (``int 5..214``); average/median and any catalog-range
-    # fallback are emitted as a supplementary ``stats`` sub-bullet.
+    # Numeric min/max is inlined (``int 5..214``); average/median and the
+    # catalog-range fallback join the same line.
     numeric_range: str | None = None
     numeric_stats: list[str] = []
     if is_numeric(column):
@@ -168,7 +183,7 @@ def profile_column(
                         select(func.avg(column)).select_from(table),
                         timeout_seconds,
                     ).scalar_one()
-                    numeric_stats.append(f"average={format_value(average)}")
+                    numeric_stats.append(f"avg={format_value(average)}")
             if total_rows < 100_000:
                 with query_timeout.metric(skipped, "median"):
                     median = median_value(
@@ -217,68 +232,97 @@ def profile_column(
     # those two values, so the range just restates them.
     if numeric_range and (full_histogram is None or len(full_histogram) > 2):
         summary.append(numeric_range)
-    lines = [
-        f"- {column.name}: {', '.join(summary) if summary else 'profile metrics skipped'}"
-    ]
-    if numeric_stats:
-        lines.append(continuation_line("stats", ", ".join(numeric_stats)))
+    # Average/median and catalog min/max ride on the same line.
+    summary.extend(numeric_stats)
 
+    # Top values for high-cardinality columns: inline on the same line. The
+    # full-histogram case is already in ``summary`` above.
+    top_inline: str | None = None
     if not sensitive and not unique_identifier and distinct_supported:
-        top_values: list[tuple[Any, int]] = []
         if full_histogram is not None:
-            # Already inlined on the column header; no separate line.
-            top_values = full_histogram
+            # Already inlined above.
+            pass
         elif conn.dialect.name == "bigquery" and approximate_top_values:
-            lines.append(
-                continuation_line(
-                    "top_values",
-                    f"≈{format_value_counts(approximate_top_values[:10])}",
-                )
-            )
+            top_inline = f"≈{format_value_counts(approximate_top_values[:10])}"
         elif total_rows <= 100_000 and indexed:
             with query_timeout.metric(skipped, "top values"):
                 top_values = get_value_counts(
                     conn, table, column, limit=10, timeout_seconds=timeout_seconds
                 )
                 if top_values and top_values[0][1] > 1:
-                    lines.append(
-                        continuation_line(
-                            "top_values",
-                            ("≈" if conn.dialect.name == "bigquery" else "")
-                            + format_value_counts(top_values),
-                        )
-                    )
+                    top_inline = (
+                        "≈" if conn.dialect.name == "bigquery" else ""
+                    ) + format_value_counts(top_values)
         elif total_rows > 100_000 and indexed:
             top_values = (
                 list(catalog_stat.top_values) if catalog_stat is not None else []
             )
             if top_values:
-                lines.append(
-                    continuation_line("top_values", format_value_counts(top_values))
-                )
+                top_inline = format_value_counts(top_values)
+    if top_inline:
+        summary.append(top_inline)
+
     # Type-specific profiling for container/LOB types that cannot be DISTINCTed.
+    # These render as a trailing annotation on the same line.
+    dropped_from_samples = False
+    trailing: list[str] = []
     if not sensitive and not unique_identifier:
         if is_json(column):
-            json_line = profile_json_column(
+            json_annotation = profile_json_column(
                 conn, table, column, total_rows, timeout_seconds
             )
-            if json_line:
-                lines.append(json_line)
+            if json_annotation:
+                trailing.append(json_annotation)
+            # JSON values are per-row diagnostics that don't belong in samples.
+            dropped_from_samples = True
         elif is_array(column):
-            array_line = profile_array_column(
+            array_annotation = profile_array_column(
                 conn, table, column, total_rows, indexed, timeout_seconds
             )
-            if array_line:
-                lines.append(array_line)
+            if array_annotation:
+                trailing.append(array_annotation)
+            dropped_from_samples = True
+        elif is_lob(column):
+            dropped_from_samples = True
 
-    lines.extend(skipped_metric_lines(skipped))
-    return lines
+    if not summary and not trailing:
+        summary.append("profile metrics skipped")
+    value_line = ", ".join(summary)
+    if trailing:
+        value_line = (value_line + "  " if value_line else "") + "  ".join(
+            f"← {t}" for t in trailing
+        ).lstrip()
+    # Re-append a skip-reason tail so timeouts remain visible without breaking
+    # the one-line invariant.
+    if skipped:
+        skip_tail = "; ".join(f"{metric} skipped ({reason})" for metric, reason in skipped)
+        value_line = f"{value_line}  [{skip_tail}]" if value_line else f"[{skip_tail}]"
+    return ColumnProfile(
+        name=column.name,
+        value_line=value_line,
+        is_sensitive=False,
+        is_unique_identifier=unique_identifier,
+        dropped_from_samples=dropped_from_samples,
+    )
 
 
-def skipped_metric_lines(skipped: list[tuple[str, str]]) -> list[str]:
-    return [
-        continuation_line(metric, f"skipped ({reason})") for metric, reason in skipped
-    ]
+def _column_profile(
+    column: Any,
+    value_line: str,
+    skipped: list[tuple[str, str]] | None = None,
+    dropped_from_samples: bool = False,
+) -> ColumnProfile:
+    text = value_line
+    if skipped:
+        skip_tail = "; ".join(f"{metric} skipped ({reason})" for metric, reason in skipped)
+        text = f"{text}  [{skip_tail}]"
+    return ColumnProfile(
+        name=column.name,
+        value_line=text,
+        is_sensitive=False,
+        is_unique_identifier=False,
+        dropped_from_samples=dropped_from_samples,
+    )
 
 
 def median_value(
@@ -387,10 +431,17 @@ def is_numeric(column: Any) -> bool:
 
 
 def numeric_type_word(column: Any) -> str:
-    """Short type label for inline numeric ranges: ``int`` vs ``num``."""
+    """Short type label for inline numeric ranges: ``int``/``float``/``numeric``.
+
+    Matches the spec's ``int 1..12592`` / ``float`` / ``numeric`` forms: integer
+    SQL types collapse to ``int``, floating-point types to ``float``, and exact
+    decimals (``NUMERIC``/``DECIMAL``) to ``numeric``.
+    """
     if isinstance(column.type, (Integer, BigInteger, SmallInteger)):
         return "int"
-    return "num"
+    if isinstance(column.type, Float):
+        return "float"
+    return "numeric"
 
 
 def is_json(column: Any) -> bool:
@@ -420,7 +471,12 @@ def profile_json_column(
     total_rows: int,
     timeout_seconds: int = 0,
 ) -> str | None:
-    """Emit top-level JSON key frequencies, bounded by row-count and size gates."""
+    """Return top-level JSON key frequencies as an inline annotation body.
+
+    Bounded by row-count and size gates. The returned string (e.g.
+    ``json_keys: a=10, b=3``) is appended to the column's ``value_line`` as a
+    trailing annotation rather than emitted as a child line.
+    """
     if total_rows > JSON_PROFILE_ROW_LIMIT:
         return None
     key_counts: dict[str, int] = {}
@@ -448,7 +504,7 @@ def profile_json_column(
         return None
     ordered = sorted(key_counts.items(), key=lambda item: (-item[1], item[0]))
     pairs = ", ".join(f"{key}={count}" for key, count in ordered)
-    return continuation_line("json_keys", pairs)
+    return f"json: {pairs}"
 
 
 def profile_array_column(
@@ -459,7 +515,7 @@ def profile_array_column(
     indexed: bool,
     timeout_seconds: int = 0,
 ) -> str | None:
-    """Emit min/avg/max element counts for an ARRAY column."""
+    """Return min/avg/max element counts for an ARRAY column as an annotation body."""
     if not (total_rows <= 5_000_000 or indexed):
         return None
     length_expr = _array_length_expr(conn, column)
@@ -486,7 +542,7 @@ def profile_array_column(
         parts.append(f"avg_len={format_value(avg_len)}")
     if max_len is not None:
         parts.append(f"max_len={format_value(max_len)}")
-    return continuation_line("array", ", ".join(parts)) if parts else None
+    return f"array: {', '.join(parts)}" if parts else None
 
 
 def _json_value_in_bounds(value: Any) -> bool:
@@ -531,24 +587,17 @@ def format_value_counts(values: list[tuple[Any, int]]) -> str:
     return ", ".join(parts)
 
 
-def continuation_line(label: str, body: str) -> str:
-    """A metric line that belongs to the column header above it.
-
-    Rendered as a nested markdown bullet: the parent list item (the column
-    header ``- col: ...`` line) already names the column, so continuation lines
-    omit the repeated column name and indent under it. The ``label`` makes the
-    metric self-describing.
-    """
-    return f"  - {label}: {body}"
-
-
 def format_value(value: Any) -> str:
     if value is None:
         return "NULL"
     if isinstance(value, float):
         return f"{value:g}"
     if isinstance(value, Decimal):
-        return f"{value:g}"
+        # PostgreSQL NUMERIC aggregates carry full scale (e.g.
+        # ``4.0000000000000000``); render through float with 12 significant
+        # digits so the inline value line stays compact while preserving enough
+        # precision for avg/median.
+        return f"{float(value):.12g}"
     return str(value)
 
 

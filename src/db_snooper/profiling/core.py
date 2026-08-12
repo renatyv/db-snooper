@@ -8,15 +8,21 @@ from sqlalchemy.engine import Engine
 from db_snooper import query_timeout
 from db_snooper._version import __version__
 from db_snooper.contracts import (
+    OBJECT_MATERIALIZED_VIEW,
     OBJECT_TABLE,
+    OBJECT_VIEW,
     ProfileProgress,
     SchemaProfilePlan,
 )
 from db_snooper.profiling.ddl import TableDdl, get_table_ddl
+from db_snooper.profiling.schema_header import (
+    format_columns_line,
+    format_fk_line,
+    format_indexes_line,
+)
 from db_snooper.profiling.tables import (
-    COLUMNS_HEADING,
-    INDEXES_HEADING,
     TableProfile,
+    _format_rows_table,
     collect_relationships,
     format_relationships,
     profile_table,
@@ -72,8 +78,8 @@ def profile_schema(
             return "\n".join(lines).rstrip() + "\n"
         # Collect foreign-key relationships once (catalog metadata only, no row
         # scans) and emit a consolidated section up front. This survives the
-        # small-table case where CREATE TABLE is omitted because every row is
-        # dumped, so join hints stay available regardless of table size.
+        # one-block-per-table rendering, so join hints stay available regardless
+        # of table size.
         relationship_lines = format_relationships(
             collect_relationships(inspect(engine), tables, options.schema),
             options.schema,
@@ -100,7 +106,7 @@ def profile_schema(
             except Exception as exc:  # noqa: BLE001
                 reflect_exc = exc
 
-            # Resolve row count once (needs a reflected table) so the DDL and
+            # Resolve row count once (needs a reflected table) so the header and
             # profiling decisions below share it. Empty tables are skipped
             # entirely unless include_empty_tables is enabled.
             size_info = (
@@ -116,109 +122,38 @@ def profile_schema(
                     progress(index, len(tables), table_name)
                 continue
 
-            lines.append(f"# {table_name}")
-            lines.append("")
-
-            # When every row is listed below, the CREATE TABLE is redundant: the
-            # row data already exposes columns, types, and constraints.
             kind = kinds.get(table_name, OBJECT_TABLE)
-            # A view's rows never reveal its SELECT definition, so always emit
-            # the view DDL even when every row is listed (unlike base tables).
-            skip_create_table = (
-                kind == OBJECT_TABLE
-                and size_info is not None
-                and size_info.all_rows_listed(options)
+            table_profile, raw_ddl, fallback_note = _profile_one_table(
+                conn,
+                engine,
+                table_name,
+                table,
+                reflect_exc,
+                kind,
+                size_info,
+                options,
+                progress,
+                index,
+                len(tables),
             )
 
-            ddl: TableDdl | None = None
-            ddl_exc: Exception | None = None
-            if not skip_create_table:
-                if not options.use_dump_ddl and table is not None:
-                    try:
-                        ddl = get_table_ddl(conn, table, kind=kind)
-                    # Any compiler/dialect failure should fall through to utility DDL.
-                    except Exception as exc:  # noqa: BLE001
-                        ddl_exc = exc
+            if table_profile is None:
+                # DDL generation failed entirely; the per-table warning was
+                # already recorded in _profile_one_table.
+                failed_ddl_tables.append(table_name)
+                continue
 
-                if ddl is None:
-                    fallback_schema = (
-                        table.schema if table is not None else None
-                    ) or options.schema
-                    try:
-                        ddl = dump_create_table(
-                            engine.url, engine.dialect.name, table_name, fallback_schema
-                        )
-                    # Utility, parser, and OS failures become a per-table warning.
-                    except Exception as exc:  # noqa: BLE001
-                        ddl_exc = ddl_exc or exc
-                        ddl = None
-                    if ddl is not None:
-                        lines.append(
-                            f"- {table_name}: CREATE TABLE via utility fallback"
-                        )
-
-                if ddl is None:
-                    exc = ddl_exc or reflect_exc
-                    failed_ddl_tables.append(table_name)
-                    lines.append(
-                        f"- {table_name}: skipped (DDL generation failed: "
-                        f"{type(exc).__name__}: {exc})"
-                    )
-                    lines.append("")
-                    lines.append("")
-                    if progress is not None:
-                        progress(index, len(tables), table_name)
-                    continue
-
-                lines.append("```sql")
-                lines.extend(ddl.create_table)
-                lines.append("```")
-                lines.append("")
-                if ddl.indexes:
-                    lines.append(INDEXES_HEADING)
-                    lines.append("")
-                    for index_ddl in ddl.indexes:
-                        lines.append(f"- {index_ddl}")
-                    lines.append("")
-
-            if table is None:
-                lines.append(
-                    f"- {table_name}: column profiling skipped "
-                    "(schema via utility fallback)"
-                )
-                lines.append("")
-            else:
-
-                # profile_table consumes this callback before the loop advances.
-                def report_column(column_name: str) -> None:
-                    if progress is not None:
-                        progress(
-                            index - 1,  # noqa: B023
-                            len(tables),
-                            f"{table_name} ({column_name})",  # noqa: B023
-                        )
-
-                table_profile: TableProfile | None = profile_table(
-                    conn,
-                    table,
-                    options,
-                    report_column=report_column,
-                    size_info=size_info,
-                    allow_table_sample=kind == OBJECT_TABLE,
-                )
-
-                if table_profile is not None:
-                    if table_profile.rows_heading:
-                        lines.append(table_profile.rows_heading)
-                        lines.append("")
-                    if table_profile.rows_lines:
-                        lines.extend(table_profile.rows_lines)
-                        lines.append("")
-                    if table_profile.columns_lines:
-                        lines.append(COLUMNS_HEADING)
-                        lines.append("")
-                        lines.extend(table_profile.columns_lines)
-                        lines.append("")
+            _emit_table_block(
+                lines,
+                table_name,
+                table_profile,
+                table,
+                conn,
+                raw_ddl,
+                fallback_note,
+                size_info,
+                options,
+            )
             lines.append("")
             if progress is not None:
                 progress(index, len(tables), table_name)
@@ -239,3 +174,194 @@ def profile_schema(
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _profile_one_table(
+    conn,
+    engine,
+    table_name: str,
+    table: Table | None,
+    reflect_exc: Exception | None,
+    kind: str,
+    size_info,
+    options,
+    progress,
+    index: int,
+    total: int,
+):
+    """Profile a single table, returning (TableProfile, raw_ddl, fallback_note).
+
+    Introspection produces the flattened header lines by default. The full
+    ``CREATE TABLE`` DDL is only ever emitted as a last-resort fallback when
+    introspection fails entirely; in that case ``raw_ddl`` carries the DDL
+    block (rendered as fenced ``sql``) and the header lines in the
+    ``TableProfile`` are left ``None``.
+    """
+    # ``raw_ddl`` is set in two cases: (1) a view/materialized view, whose
+    # SELECT definition introspection cannot derive, so its CREATE VIEW DDL is
+    # the header; and (2) the last-resort utility fallback when reflection of a
+    # base table failed entirely.
+    raw_ddl: list[str] | None = None
+    fallback_note: str | None = None
+
+    ddl: TableDdl | None = None
+    ddl_exc: Exception | None = None
+    if table is not None and not options.use_dump_ddl:
+        try:
+            ddl = get_table_ddl(conn, table, kind=kind)
+        except Exception as exc:  # noqa: BLE001
+            ddl_exc = exc
+
+    # Views always need their SELECT definition, which introspection cannot
+    # derive; emit the view DDL as the header in place of the flattened lines.
+    if kind in {OBJECT_VIEW, OBJECT_MATERIALIZED_VIEW} and ddl is not None:
+        raw_ddl = ddl.create_table
+
+    if ddl is None and table is None:
+        # Reflection failed: try the utility dump (pg_dump/mysqldump) as the
+        # last-resort source of the DDL block.
+        fallback_schema = options.schema
+        try:
+            ddl = dump_create_table(
+                engine.url, engine.dialect.name, table_name, fallback_schema
+            )
+        except Exception as exc:  # noqa: BLE001
+            ddl_exc = ddl_exc or exc
+            ddl = None
+        if ddl is not None:
+            raw_ddl = ddl.create_table
+            fallback_note = f"- {table_name}: CREATE TABLE via utility fallback"
+
+    if table is None and raw_ddl is None:
+        # Introspection and the utility fallback both failed; the caller marks
+        # this table as failed and emits a summary bullet.
+        return None, None, None
+
+    # Profile the table (or note that profiling was skipped via utility DDL).
+    if table is not None:
+        def report_column(column_name: str) -> None:
+            if progress is not None:
+                progress(
+                    index - 1,
+                    total,
+                    f"{table_name} ({column_name})",
+                )
+
+        table_profile = profile_table(
+            conn,
+            table,
+            options,
+            report_column=report_column,
+            size_info=size_info,
+            allow_table_sample=kind == OBJECT_TABLE,
+        )
+        # Flattened header lines come from introspection on the reflected base
+        # table. Views/materialized views render their CREATE VIEW DDL instead
+        # (via raw_ddl), so the introspection header is skipped for them.
+        if raw_ddl is None:
+            table_profile.columns_line = format_columns_line(table, conn)
+            table_profile.indexes_line = format_indexes_line(table, conn)
+            table_profile.fk_line = format_fk_line(table)
+    else:
+        # Introspection unavailable; only the raw DDL block remains.
+        table_profile = TableProfile(
+            note="column profiling skipped (schema via utility fallback)"
+        )
+
+    return table_profile, raw_ddl, fallback_note
+
+
+def _emit_table_block(
+    lines: list[str],
+    table_name: str,
+    table_profile: TableProfile,
+    table: Table | None,
+    conn,
+    raw_ddl: list[str] | None,
+    fallback_note: str | None,
+    size_info,
+    options,
+) -> None:
+    """Append the one-block-per-table rendering to ``lines``.
+
+    Layout (blank-line-separated):
+        # <table>  (rows=<N>)
+        columns: ...
+        indexes: ...
+        fk: ...
+        values:
+        <col>: <inline>
+        samples: / all rows:
+        | column | ... |
+    """
+    row_display = table_profile.row_count_display
+    if not row_display and size_info is not None:
+        # Empty included tables: total_rows is 0.
+        if size_info.total_rows is not None:
+            row_display = str(size_info.total_rows)
+        elif size_info.estimate is not None:
+            row_display = f"≈{size_info.estimate}"
+    header = f"# {table_name}"
+    if row_display:
+        header += f"  (rows={row_display})"
+    lines.append(header)
+    lines.append("")
+
+    if fallback_note:
+        lines.append(fallback_note)
+
+    if raw_ddl is not None:
+        # Last-resort: emit the raw CREATE TABLE in a fenced sql block in
+        # place of the three header lines, then continue with values/samples.
+        lines.append("```sql")
+        lines.extend(raw_ddl)
+        lines.append("```")
+        lines.append("")
+    else:
+        for line in (
+            table_profile.columns_line,
+            table_profile.indexes_line,
+            table_profile.fk_line,
+        ):
+            if line:
+                lines.append(line)
+        lines.append("")
+
+    # values: block — one line per column (suppressed for included empty
+    # tables, which carry no data context).
+    is_empty_included = (
+        size_info is not None
+        and size_info.is_empty
+        and options.include_empty_tables
+    )
+    if table_profile.column_profiles and not is_empty_included:
+        lines.append("values:")
+        for profile in table_profile.column_profiles:
+            lines.append(f"{profile.name}: {profile.value_line}")
+        lines.append("")
+
+    # samples: / all rows: block.
+    if is_empty_included:
+        # Nothing to sample; emit an empty marker per spec line 14.
+        lines.append("all rows:")
+        lines.append("| column |  |")
+    elif table_profile.sample_rows or table_profile.is_small_table_all_rows:
+        if table_profile.is_small_table_all_rows:
+            heading = "all rows:"
+        else:
+            heading = "samples:"
+        lines.append(heading)
+        sample_columns = table_profile.sample_columns
+        if not sample_columns and table is not None:
+            sample_columns = [c.name for c in table.columns]
+        lines.extend(
+            _format_rows_table(
+                sample_columns,
+                table_profile.sample_rows,
+                table_profile.sample_labels,
+            )
+        )
+        if table_profile.note:
+            lines.append(f"- {table_profile.note}")
+    elif table_profile.note:
+        lines.append(f"- {table_profile.note}")

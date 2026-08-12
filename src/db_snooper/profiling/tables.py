@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy import Table, desc, func, select, text
@@ -17,7 +17,6 @@ from db_snooper.database_stats import (
 )
 from db_snooper.profiling.columns import (
     JSON_MAX_VALUE_BYTES,
-    continuation_line,
     format_value,
     format_value_counts,
     get_unique_column_names,
@@ -25,32 +24,38 @@ from db_snooper.profiling.columns import (
     json_dumps,
     jsonable,
     profile_column,
-    skipped_metric_lines,
 )
+from db_snooper.profiling.models import ColumnProfile
 from db_snooper.shared import is_sensitive
-
-# Section headings emitted inside each table profile. The table name is the
-# top-level heading, so these nest one level below it.
-ROWS_HEADING = "## Rows"
-ALL_ROWS_HEADING = "## All rows"
-COLUMNS_HEADING = "## Columns"
-INDEXES_HEADING = "## Indexes"
 
 
 @dataclass
 class TableProfile:
-    """Structured profile for a single table, split into renderable sections.
+    """Structured profile for a single table, rendered as one compact block.
 
-    ``rows_heading``/``rows_lines`` carry the sampled-rows section (``## Rows``
-    for larger tables with a total + latest/sample table, ``## All rows`` for
-    small tables that dump every row). ``columns_lines`` carries the per-column
-    profile section (``## Columns``); it is empty for small tables and for
-    tables whose column profiling was skipped.
+    The normal path fills ``columns_line``/``indexes_line``/``fk_line`` (the
+    flattened schema header). When introspection fully fails, ``raw_ddl`` holds
+    the last-resort CREATE TABLE block (rendered as a fenced ``sql`` block) and
+    the three header lines are ``None``. ``column_profiles`` drives the
+    ``values:`` block; ``sample_*`` fields drive ``samples:``/``all rows:``.
     """
 
-    rows_heading: str | None
-    rows_lines: list[str]
-    columns_lines: list[str]
+    columns_line: str | None = None
+    indexes_line: str | None = None
+    fk_line: str | None = None
+    raw_ddl: list[str] | None = None
+    fallback_note: str | None = None
+    column_profiles: list[ColumnProfile] = field(default_factory=list)
+    sample_columns: list[str] = field(default_factory=list)
+    sample_rows: list[dict[str, Any]] = field(default_factory=list)
+    sample_labels: list[str] = field(default_factory=list)
+    is_small_table_all_rows: bool = False
+    row_count_display: str = ""
+    # When True, catalog estimates are tagged "(from db stats)" per spec line 18.
+    from_db_stats: bool = False
+    # Skip/diagnostic note rendered as a trailing bullet under the table block
+    # (e.g. a timed-out row count). Empty when the table profiled cleanly.
+    note: str | None = None
 
 
 @dataclass(frozen=True)
@@ -227,60 +232,70 @@ def resolve_table_size(
 def profile_table_from_stats(
     conn: Connection, table: Table, estimate: int
 ) -> TableProfile:
-    # The table is too large to scan, but its catalog stats are free. Emit a
-    # per-column summary derived entirely from those stats.
-    rows_lines = [
-        f"- total≈{estimate} (estimated from db stats; row/column profiling skipped)"
-    ]
-    columns_lines: list[str] = []
+    """Profile a too-large-to-scan table entirely from catalog statistics.
+
+    Every metric is an estimate; per spec line 18 each value line is tagged
+    ``(from db stats)`` and counts use the ``≈`` marker so they are
+    distinguishable from exact metrics. Sensitive columns emit ``redacted``.
+    """
+    column_profiles: list[ColumnProfile] = []
     catalog = get_catalog_column_stats(conn, table, estimate)
     for column in table.columns:
-        stat = catalog.get(column.name)
-        if stat is None:
+        sensitive = is_sensitive(column.name)
+        if sensitive:
+            column_profiles.append(
+                ColumnProfile(
+                    name=column.name,
+                    value_line="redacted",
+                    is_sensitive=True,
+                    is_unique_identifier=False,
+                    dropped_from_samples=False,
+                )
+            )
             continue
-        columns_lines.extend(_catalog_column_lines(column, stat, estimate))
+        stat = catalog.get(column.name)
+        body = _catalog_value_line(column, stat, estimate)
+        if body is None:
+            # No catalog stats for this column: nothing to say inline.
+            continue
+        column_profiles.append(
+            ColumnProfile(
+                name=column.name,
+                value_line=f"{body} (from db stats)",
+                is_sensitive=False,
+                is_unique_identifier=False,
+                dropped_from_samples=False,
+            )
+        )
     return TableProfile(
-        rows_heading=ROWS_HEADING,
-        rows_lines=rows_lines,
-        columns_lines=columns_lines,
+        row_count_display=f"≈{estimate}",
+        column_profiles=column_profiles,
+        from_db_stats=True,
     )
 
 
-def _catalog_column_lines(column: Any, stat: Any, estimate: int) -> list[str]:
+def _catalog_value_line(column: Any, stat: Any, estimate: int) -> str | None:
+    """Build the inline metric body (without the ``(from db stats)`` tag) from
+    one column's catalog statistics."""
+    if stat is None:
+        return None
     parts: list[str] = []
     if stat.null_frac is not None:
         nulls = round(stat.null_frac * estimate)
-        parts.extend((f"nulls≈{nulls}", f"non_nulls≈{estimate - nulls}"))
+        parts.append(f"nulls≈{nulls}")
     if stat.distinct is not None:
         parts.append(f"distinct≈{stat.distinct}")
-    has_numeric = (
-        is_numeric(column) and stat.min_value is not None and stat.max_value is not None
-    )
-    # Top values can expose real column values, so suppress them for sensitive
-    # columns (mirrors the exact profiling path).
-    has_top_values = bool(stat.top_values) and not is_sensitive(column.name)
-    lines: list[str] = []
-    if parts or has_numeric or has_top_values:
-        # Emit a header so the continuation lines below are never orphaned,
-        # even when null/distinct stats are absent but min/max or top_values
-        # are available.
-        lines.append(
-            f"- {column.name} (from db stats): {', '.join(parts)}"
-            if parts
-            else f"- {column.name} (from db stats):"
+    if (
+        is_numeric(column)
+        and stat.min_value is not None
+        and stat.max_value is not None
+    ):
+        parts.append(
+            f"min≈{format_value(stat.min_value)}, max≈{format_value(stat.max_value)}"
         )
-    if has_numeric:
-        lines.append(
-            continuation_line(
-                "numeric",
-                f"min≈{format_value(stat.min_value)}, max≈{format_value(stat.max_value)}",
-            )
-        )
-    if has_top_values:
-        lines.append(
-            continuation_line("top_values", format_value_counts(list(stat.top_values)))
-        )
-    return lines
+    if stat.top_values:
+        parts.append(format_value_counts(list(stat.top_values)))
+    return ", ".join(parts) if parts else None
 
 
 def _format_cell(value: Any) -> str:
@@ -296,12 +311,12 @@ def _format_cell(value: Any) -> str:
         return "true" if value else "false"
     if isinstance(value, (dict, list)):
         try:
-            text = json_dumps(value)
+            text_value = json_dumps(value)
         except (TypeError, ValueError):
-            text = str(value)
+            text_value = str(value)
     else:
-        text = format_value(value)
-    return str(text).replace("|", "\\|").replace("\n", " ")
+        text_value = format_value(value)
+    return str(text_value).replace("|", "\\|").replace("\n", " ")
 
 
 def _format_rows_table(
@@ -317,7 +332,7 @@ def _format_rows_table(
     tables that dump every row).
     """
     if not rows:
-        return ["- (no rows sampled)"]
+        return ["| column | " + " | ".join(column_labels) + " |"]
     width = 1 + len(column_labels)
     lines = [
         "| column | " + " | ".join(column_labels) + " |",
@@ -327,6 +342,22 @@ def _format_rows_table(
         cells = [_format_cell(row.get(name)) for row in rows]
         lines.append(f"| {name} | " + " | ".join(cells) + " |")
     return lines
+
+
+def select_sample_columns(column_profiles: list[ColumnProfile]) -> list[str]:
+    """Pick which columns appear in the ``samples:`` table.
+
+    Excluded: sensitive columns (redacted elsewhere) and columns flagged
+    ``dropped_from_samples`` (per-row JSON/array/TEXT diagnostics whose concrete
+    values don't add information). Everything else is kept — identifiers,
+    numeric ranges, timestamps, foreign keys, and any column whose value line
+    is merely ``N distinct`` all benefit from showing actual values.
+    """
+    return [
+        profile.name
+        for profile in column_profiles
+        if not profile.is_sensitive and not profile.dropped_from_samples
+    ]
 
 
 def profile_table(
@@ -340,23 +371,21 @@ def profile_table(
     if size_info is None:
         size_info = resolve_table_size(conn, table, options)
     if size_info.is_large:
-        return profile_table_from_stats(conn, table, size_info.estimate)
+        profile = profile_table_from_stats(conn, table, size_info.estimate)
+        # Header lines are derived from the reflected table introspection.
+        return profile
     if size_info.skip_reason:
         return TableProfile(
-            rows_heading=None,
-            rows_lines=[f"- {table.name}: skipped ({size_info.skip_reason})"],
-            columns_lines=[],
+            row_count_display="",
+            note=f"skipped ({size_info.skip_reason})",
         )
     total_rows = size_info.total_rows
     if total_rows is None:
         # Unreachable: is_large/skip_reason return early above.
         return TableProfile(
-            rows_heading=None,
-            rows_lines=[f"- {table.name}: skipped (row count unavailable)"],
-            columns_lines=[],
+            row_count_display="",
+            note="skipped (row count unavailable)",
         )
-
-    column_names = [column.name for column in table.columns]
 
     if total_rows <= options.small_table_threshold:
         sampled: list[dict[str, Any]] = []
@@ -365,27 +394,21 @@ def profile_table(
                 conn, table, options.small_table_threshold, options.query_timeout
             )
         labels = [f"row {index + 1}" for index in range(len(sampled))]
-        rows_lines = _format_rows_table(column_names, sampled, labels)
-        # Every row fits: we only reach here when total_rows <= threshold, and
-        # the LIMIT is that same threshold, so the rows alone expose the count
-        # and schema. No total is printed and the section is labelled "All
-        # rows". The length guard is defensive against rows vanishing between
-        # the COUNT and the SELECT.
-        if sampled and len(sampled) >= total_rows:
-            return TableProfile(
-                rows_heading=ALL_ROWS_HEADING,
-                rows_lines=rows_lines,
-                columns_lines=[],
-            )
+        column_profiles = _profile_all_columns(
+            conn, table, options, int(total_rows), report_column
+        )
+        # Small tables (<10 rows) emit both values: and all rows: per spec.
+        sample_columns = select_sample_columns(column_profiles)
         return TableProfile(
-            rows_heading=ROWS_HEADING,
-            rows_lines=[f"- total={total_rows}", "", *rows_lines],
-            columns_lines=[],
+            column_profiles=column_profiles,
+            sample_columns=sample_columns,
+            sample_rows=sampled,
+            sample_labels=labels,
+            is_small_table_all_rows=True,
+            row_count_display=str(total_rows),
         )
 
-    # Larger table: total + latest + random rows in one transposed table,
-    # then per-column profiles.
-    rows_lines = [f"- total={total_rows}"]
+    # Larger table: latest + random rows, then per-column profiles.
     row_skips: list[tuple[str, str]] = []
     latest: list[dict[str, Any]] = []
     with query_timeout.metric(row_skips, "latest rows"):
@@ -416,15 +439,32 @@ def profile_table(
 
     combined = list(latest) + list(random_sample)
     labels = ["latest"] * len(latest) + ["sample"] * len(random_sample)
-    rows_lines.append("")
-    if combined:
-        rows_lines.extend(_format_rows_table(column_names, combined, labels))
-    else:
-        rows_lines.append("- (no rows sampled)")
+    column_profiles = _profile_all_columns(
+        conn, table, options, int(total_rows), report_column
+    )
+    sample_columns = select_sample_columns(column_profiles)
+    note = None
     if row_skips:
-        rows_lines.append("")
-        rows_lines.extend(skipped_metric_lines(row_skips))
+        note = "; ".join(f"{m} skipped ({r})" for m, r in row_skips)
+    return TableProfile(
+        column_profiles=column_profiles,
+        sample_columns=sample_columns,
+        sample_rows=combined,
+        sample_labels=labels,
+        is_small_table_all_rows=False,
+        row_count_display=str(total_rows),
+        note=note,
+    )
 
+
+def _profile_all_columns(
+    conn: Connection,
+    table: Table,
+    options: ProfileOptions,
+    total_rows: int,
+    report_column: Callable[[str], None] | None,
+) -> list[ColumnProfile]:
+    """Profile every column of ``table`` in declared order."""
     unique_columns = get_unique_column_names(table)
     indexed_columns = get_indexed_column_names(table)
     # Catalog stats are fetched once per table (a single cheap catalog read) and
@@ -435,27 +475,23 @@ def profile_table(
         if total_rows > 100_000
         else {}
     )
-    columns_lines: list[str] = []
+    profiles: list[ColumnProfile] = []
     for column in table.columns:
         if report_column is not None:
             report_column(column.name)
-        columns_lines.extend(
+        profiles.append(
             profile_column(
                 conn,
                 table,
                 column,
-                int(total_rows),
+                total_rows,
                 unique_columns,
                 indexed_columns,
                 options.query_timeout,
                 catalog_stat=catalog_stats.get(column.name),
             )
         )
-    return TableProfile(
-        rows_heading=ROWS_HEADING,
-        rows_lines=rows_lines,
-        columns_lines=columns_lines,
-    )
+    return profiles
 
 
 def sample_rows(
