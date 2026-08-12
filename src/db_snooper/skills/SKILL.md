@@ -27,7 +27,7 @@ Run the profiler with `uvx` (no install needed). PostgreSQL example:
 uvx db-snooper profile --db-type postgres --database app_db --user readonly_user --host localhost --port 5432 --ask-password
 ```
 
-See every flag and its default — connection details, `--schema`, `--include-tables`/`--exclude-tables`, thresholds, `--per-table`, `--output`, and the `DB_SNOOPER_*` environment-variable fallbacks — with:
+See every flag and its default — connection details, `--schema`, `--include-tables`/`--exclude-tables`, safety limits, `--per-table`, `--output`, and the `DB_SNOOPER_*` environment-variable fallbacks — with:
 
 ```bash
 uvx db-snooper -h

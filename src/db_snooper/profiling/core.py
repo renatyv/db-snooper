@@ -102,7 +102,7 @@ def profile_schema(
 
             # Resolve row count once (needs a reflected table) so the DDL and
             # profiling decisions below share it. Empty tables are skipped
-            # entirely unless --include-empty-tables is set.
+            # entirely unless include_empty_tables is enabled.
             size_info = (
                 resolve_table_size(conn, table, options) if table is not None else None
             )

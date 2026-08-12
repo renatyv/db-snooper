@@ -401,7 +401,9 @@ def profile_table(
             ("random rows", "native table sampling is unavailable for views")
         )
     elif options.random_sample_percent <= 0:
-        row_skips.append(("random rows", "disabled by --random-sample-percent=0"))
+        row_skips.append(
+            ("random rows", "disabled by ProfileOptions(random_sample_percent=0)")
+        )
     else:
         with query_timeout.metric(row_skips, "random rows"):
             random_sample = random_rows(

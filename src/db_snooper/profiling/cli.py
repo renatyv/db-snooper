@@ -26,39 +26,30 @@ _DEFAULTS = ProfileOptions()
 
 def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Generate a SQL profile for a database.", prog=prog
+        description="Generate a SQL profile for a database.",
+        prog=prog,
+        usage="%(prog)s [connection options] [profile options]",
     )
     add_connection_arguments(parser)
-    parser.add_argument("--output", help="Output directory. Defaults to <database>/.")
-    parser.add_argument(
-        "--small-table-threshold",
-        type=int,
-        default=_DEFAULTS.small_table_threshold,
-        help="Tables with this many rows or fewer are dumped in full.",
-    )
-    parser.add_argument(
-        "--latest-row-limit",
-        type=int,
-        default=_DEFAULTS.latest_row_limit,
-        help="Most-recent rows (by key) shown for tables above the small-table threshold.",
-    )
-    parser.add_argument(
-        "--random-row-limit",
-        type=int,
-        default=_DEFAULTS.random_row_limit,
-        help="Random rows shown for tables above the small-table threshold.",
-    )
-    parser.add_argument(
-        "--large-table-threshold",
-        type=int,
-        default=_DEFAULTS.large_table_threshold,
+    profile = parser.add_argument_group("profile")
+    filters = parser.add_argument_group("table filters")
+    safety = parser.add_argument_group("safety limits")
+    profile.add_argument("--output", help="Output directory. Defaults to <database>/.")
+    profile.add_argument(
+        "--metadata-only",
+        action="store_true",
         help=(
-            "Tables whose catalog row estimate is at/above this count are profiled "
-            "from internal stats only; COUNT(*) and per-column queries are skipped. "
-            f"Default {_DEFAULTS.large_table_threshold}."
+            "Emit schema, row estimates, and catalog statistics without scanning rows."
         ),
     )
-    parser.add_argument(
+    profile.add_argument(
+        "--per-table",
+        action="store_true",
+        help="Write one .md profile per table instead of one schema profile.",
+    )
+    filters.add_argument("--include-tables", help="Comma-separated table allowlist.")
+    filters.add_argument("--exclude-tables", help="Comma-separated table denylist.")
+    safety.add_argument(
         "--query-timeout",
         type=int,
         default=_DEFAULTS.query_timeout,
@@ -69,7 +60,7 @@ def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
             f"Default {_DEFAULTS.query_timeout}."
         ),
     )
-    parser.add_argument(
+    safety.add_argument(
         "--max-bytes-billed",
         type=int,
         default=_DEFAULTS.max_bytes_billed,
@@ -79,53 +70,6 @@ def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
             f"Default {_DEFAULTS.max_bytes_billed}."
         ),
     )
-    parser.add_argument(
-        "--random-sample-percent",
-        type=float,
-        default=_DEFAULTS.random_sample_percent,
-        help=(
-            "Table percentage used by native BigQuery/PostgreSQL random sampling; "
-            f"0 disables. Default {_DEFAULTS.random_sample_percent}."
-        ),
-    )
-    parser.add_argument(
-        "--metadata-only",
-        action="store_true",
-        help=(
-            "Emit schema, row estimates, and catalog statistics without scanning rows."
-        ),
-    )
-    parser.add_argument(
-        "--per-table",
-        action="store_true",
-        help="Write one .md profile per table instead of one schema profile.",
-    )
-    parser.add_argument("--include-tables", help="Comma-separated table allowlist.")
-    parser.add_argument("--exclude-tables", help="Comma-separated table denylist.")
-    parser.add_argument(
-        "--include-technical-tables",
-        action="store_true",
-        help=(
-            "Profile migration/framework tables (e.g. schema_migrations, "
-            "alembic_version, flyway_schema_history) that are skipped by default."
-        ),
-    )
-    parser.add_argument(
-        "--include-empty-tables",
-        action="store_true",
-        help=(
-            "Profile tables with zero rows (emitting their CREATE TABLE). "
-            "By default empty tables are skipped entirely."
-        ),
-    )
-    parser.add_argument(
-        "--use-dump-ddl",
-        action="store_true",
-        help=(
-            "Always emit CREATE TABLE via pg_dump/mysqldump instead of SQLAlchemy "
-            "reflection (testing aid for the utility fallback)."
-        ),
-    )
     return parser
 
 
@@ -133,39 +77,28 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     logging.basicConfig(level=logging.WARNING, format="%(message)s", stream=sys.stderr)
     parser = build_arg_parser(prog=prog)
     args = parser.parse_args(argv)
-    if args.large_table_threshold < 1:
-        parser.error("--large-table-threshold must be a positive integer")
     if args.query_timeout < 0:
         parser.error("--query-timeout must be a non-negative integer")
     if args.max_bytes_billed < 0:
         parser.error("--max-bytes-billed must be a non-negative integer")
-    if not 0 <= args.random_sample_percent <= 100:
-        parser.error("--random-sample-percent must be between 0 and 100")
     url = resolve_database_url(args, parser)
 
     options = ProfileOptions(
-        small_table_threshold=args.small_table_threshold,
-        latest_row_limit=args.latest_row_limit,
-        random_row_limit=args.random_row_limit,
-        large_table_threshold=args.large_table_threshold,
         query_timeout=args.query_timeout,
         max_bytes_billed=args.max_bytes_billed,
-        random_sample_percent=args.random_sample_percent,
         metadata_only=args.metadata_only,
         include_tables=parse_table_set(args.include_tables),
         exclude_tables=parse_table_set(args.exclude_tables) or frozenset(),
         schema=resolve_schema(args),
-        include_technical_tables=args.include_technical_tables,
-        include_empty_tables=args.include_empty_tables,
-        use_dump_ddl=args.use_dump_ddl,
     )
     engine = create_engine(url)
     progress_bar = ProgressBar("Profiling", 0)
 
     def show_progress(current: int, total: int, item: str) -> None:
-        nonlocal progress_bar
+        # The total isn't known until the first callback (after table
+        # discovery), so seed it once and start the live display.
         if progress_bar.total != total:
-            progress_bar = ProgressBar("Profiling", total)
+            progress_bar.total = total
             progress_bar.start(f"profiling {item}")
             return
         progress_bar.update(

@@ -27,13 +27,16 @@ DEFAULT_PORTS = {
 
 
 def add_connection_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
+    connection = parser.add_argument_group("connection")
+    authentication = parser.add_argument_group("authentication")
+    rds = parser.add_argument_group("Amazon RDS IAM")
+    connection.add_argument(
         "--db-type",
         choices=sorted(DRIVER_NAMES),
         default=None,
         help="Database type. Defaults to DB_SNOOPER_DB_TYPE.",
     )
-    parser.add_argument(
+    connection.add_argument(
         "--database",
         default=None,
         help=(
@@ -41,51 +44,51 @@ def add_connection_arguments(parser: argparse.ArgumentParser) -> None:
             "Defaults to DB_SNOOPER_DATABASE."
         ),
     )
-    parser.add_argument(
+    connection.add_argument(
         "--host",
         default=None,
         help="Database host. Defaults to DB_SNOOPER_DB_HOST or localhost.",
     )
-    parser.add_argument(
+    connection.add_argument(
         "--port",
         type=int,
         default=None,
         help="Database port. Defaults to DB_SNOOPER_DB_PORT or the database server default.",
     )
-    parser.add_argument(
+    authentication.add_argument(
         "--user", default=None, help="Database user. Defaults to DB_SNOOPER_DB_USER."
     )
-    parser.add_argument(
+    authentication.add_argument(
         "--password",
         default=None,
         help="Database password. Defaults to DB_SNOOPER_DB_PASSWORD, then a secure prompt for server databases.",
     )
-    parser.add_argument(
+    authentication.add_argument(
         "--ask-password",
         action="store_true",
         help="Prompt securely for the database password.",
     )
-    parser.add_argument(
+    authentication.add_argument(
         "--ssl-ca",
         default=None,
         help="CA bundle for verified PostgreSQL/MySQL/MariaDB TLS. Defaults to DB_SNOOPER_SSL_CA.",
     )
-    parser.add_argument(
+    rds.add_argument(
         "--rds-iam",
         action="store_true",
         help="Use Amazon RDS IAM authentication via the AWS CLI instead of a password.",
     )
-    parser.add_argument(
+    rds.add_argument(
         "--aws-region",
         default=None,
         help="AWS Region for RDS IAM authentication. Defaults to AWS CLI configuration.",
     )
-    parser.add_argument(
+    rds.add_argument(
         "--aws-profile",
         default=None,
         help="AWS CLI profile for RDS IAM authentication.",
     )
-    parser.add_argument(
+    connection.add_argument(
         "--schema",
         default=None,
         help="Schema to inspect. Defaults to DB_SNOOPER_SCHEMA; without either, all user schemas are inspected.",

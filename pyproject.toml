@@ -12,6 +12,7 @@ dependencies = [
     "psycopg>=3.2",
     "duckdb-engine>=0.13",
     "sqlalchemy-bigquery>=1.16",
+    "rich>=13.0",
 ]
 classifiers = [
     "License :: OSI Approved :: MIT License",
