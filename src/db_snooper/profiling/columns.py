@@ -438,7 +438,7 @@ def _json_value_in_bounds(value: Any) -> bool:
 
 def _json_keys(value: Any) -> list[str]:
     if isinstance(value, dict):
-        return [str(key) for key in value.keys()]
+        return [str(key) for key in value]
     return []
 
 
@@ -454,8 +454,7 @@ def _array_length_expr(conn: Connection, column: Any):
 
 
 def is_identifier_name(column_name: str) -> bool:
-    lower_name = column_name.lower()
-    return lower_name == "id" or lower_name.endswith("_id") or lower_name.endswith("id")
+    return column_name.lower().endswith("id")
 
 
 def format_value_counts(values: list[tuple[Any, int]]) -> str:

@@ -62,9 +62,7 @@ def is_query_timeout(exc: SQLAlchemyError) -> bool:
     sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
     if sqlstate == "57014":
         return True
-    if _orig_error_code(orig) in {"3024", "1969", "1317"}:
-        return True
-    return False
+    return _orig_error_code(orig) in {"3024", "1969", "1317"}
 
 
 def _orig_error_code(orig: object | None) -> str | None:

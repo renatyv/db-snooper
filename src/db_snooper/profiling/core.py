@@ -86,7 +86,8 @@ def profile_schema(
                 table = Table(
                     table_name, metadata, schema=options.schema, autoload_with=conn
                 )
-            except Exception as exc:
+            # Dialect plugins may raise non-SQLAlchemy errors; utility DDL is the fallback.
+            except Exception as exc:  # noqa: BLE001
                 reflect_exc = exc
 
             # Resolve row count once (needs a reflected table) so the DDL and
@@ -125,7 +126,8 @@ def profile_schema(
                 if not options.use_dump_ddl and table is not None:
                     try:
                         ddl = get_table_ddl(conn, table, kind=kind)
-                    except Exception as exc:
+                    # Any compiler/dialect failure should fall through to utility DDL.
+                    except Exception as exc:  # noqa: BLE001
                         ddl_exc = exc
 
                 if ddl is None:
@@ -136,7 +138,8 @@ def profile_schema(
                         ddl = dump_create_table(
                             engine.url, engine.dialect.name, table_name, fallback_schema
                         )
-                    except Exception as exc:
+                    # Utility, parser, and OS failures become a per-table warning.
+                    except Exception as exc:  # noqa: BLE001
                         ddl_exc = ddl_exc or exc
                         ddl = None
                     if ddl is not None:
@@ -176,10 +179,13 @@ def profile_schema(
                 lines.append("")
             else:
 
+                # profile_table consumes this callback before the loop advances.
                 def report_column(column_name: str) -> None:
                     if progress is not None:
                         progress(
-                            index - 1, len(tables), f"{table_name} ({column_name})"
+                            index - 1,  # noqa: B023
+                            len(tables),
+                            f"{table_name} ({column_name})",  # noqa: B023
                         )
 
                 table_profile: TableProfile | None = profile_table(

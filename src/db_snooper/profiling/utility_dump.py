@@ -115,6 +115,7 @@ def _run(cmd: list[str], url: URL, binary_name: str) -> str:
     completed = subprocess.run(
         cmd,
         capture_output=True,
+        check=False,
         text=True,
         timeout=_DUMP_TIMEOUT_SECONDS,
         env=env,

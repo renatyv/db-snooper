@@ -60,9 +60,10 @@ def run_profiles(
                 + ", ".join(sorted(plan.skipped_technical_tables))
             )
 
+        # profile_schema consumes this callback before the loop advances.
         def schema_progress(current: int, total: int, item: str) -> None:
             if progress is not None:
-                progress(current, total, f"{schema}: {item}")
+                progress(current, total, f"{schema}: {item}")  # noqa: B023
 
         accessible = set(plan.permission_report.accessible_tables)
         if per_table:
