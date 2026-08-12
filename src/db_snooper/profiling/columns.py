@@ -42,7 +42,7 @@ def profile_column(
     counts_available = total_rows <= 5_000_000 or indexed
     non_nulls: int | None = None
     nulls: int | None = None
-    skipped: list[str] = []
+    skipped: list[tuple[str, str]] = []
     if counts_available:
         with query_timeout.metric(skipped, "null/non-null counts"):
             non_nulls = int(
@@ -56,34 +56,53 @@ def profile_column(
             nulls = total_rows - non_nulls
             if non_nulls == 0:
                 lines = [f"- {column.name}: all NULL"]
-                lines.extend(_skipped_metric_lines(skipped, timeout_seconds))
+                lines.extend(skipped_metric_lines(skipped))
                 return lines
 
     distinct_supported = is_distinct_supported(column)
     distinct_available = distinct_supported and (
-        total_rows <= 100_000 or (total_rows <= 1_000_000 and indexed)
+        conn.dialect.name == "bigquery"
+        or total_rows <= 100_000
+        or (total_rows <= 1_000_000 and indexed)
     )
+    sensitive = is_sensitive(column.name)
     distinct_count: int | None = None
+    approximate_top_values: list[tuple[Any, int]] = []
     if distinct_available:
         with query_timeout.metric(skipped, "distinct count"):
-            distinct_count = int(
-                query_timeout.execute(
+            if conn.dialect.name == "bigquery":
+                expressions = [func.approx_count_distinct(column)]
+                if not sensitive:
+                    expressions.append(func.approx_top_count(column, 20))
+                row = query_timeout.execute(
                     conn,
-                    select(func.count(func.distinct(column))).select_from(table),
+                    select(*expressions)
+                    .select_from(table)
+                    .where(column.is_not(None)),
                     timeout_seconds,
-                ).scalar_one()
-            )
+                ).one()
+                distinct_count = int(row[0])
+                if not sensitive:
+                    approximate_top_values = _bigquery_value_counts(row[1])
+            else:
+                distinct_count = int(
+                    query_timeout.execute(
+                        conn,
+                        select(func.count(func.distinct(column))).select_from(table),
+                        timeout_seconds,
+                    ).scalar_one()
+                )
 
     unique_identifier = column.name in unique_columns or (
-        distinct_count is not None
+        conn.dialect.name != "bigquery"
+        and distinct_count is not None
         and nulls == 0
         and non_nulls is not None
         and distinct_count == non_nulls
         and is_identifier_name(column.name)
     )
-    sensitive = is_sensitive(column.name)
-
-    # Low-cardinality columns: fetch the full histogram up front so the
+    # Low-cardinality columns: fetch the full (or BigQuery approximate) histogram
+    # up front so the
     # value=count pairs can be inlined into the column header (replacing the
     # "N distinct" label) and so average/median can be skipped for numeric
     # columns, where the counts already are the precise distribution.
@@ -95,10 +114,13 @@ def profile_column(
         and distinct_count is not None
         and distinct_count < 20
     ):
-        with query_timeout.metric(skipped, "value counts"):
-            full_histogram = get_value_counts(
-                conn, table, column, limit=None, timeout_seconds=timeout_seconds
-            )
+        if conn.dialect.name == "bigquery":
+            full_histogram = approximate_top_values or None
+        else:
+            with query_timeout.metric(skipped, "value counts"):
+                full_histogram = get_value_counts(
+                    conn, table, column, limit=None, timeout_seconds=timeout_seconds
+                )
 
     # Numeric min/max is computed first so the range can be inlined on the
     # column header (``int 5..214``); average/median and any catalog-range
@@ -134,7 +156,7 @@ def profile_column(
         include_avg_median = (
             col_name != "id"
             and not col_name.endswith("_id")
-            # The full histogram is the exact distribution, so average/median
+            # The histogram already describes the distribution, so average/median
             # would only restate it.
             and full_histogram is None
         )
@@ -152,7 +174,8 @@ def profile_column(
                     median = median_value(
                         conn, table, column, timeout_seconds=timeout_seconds
                     )
-                    numeric_stats.append(f"median={format_value(median)}")
+                    marker = "≈" if conn.dialect.name == "bigquery" else "="
+                    numeric_stats.append(f"median{marker}{format_value(median)}")
 
     summary: list[str] = []
     if unique_identifier:
@@ -160,7 +183,8 @@ def profile_column(
     if full_histogram is not None:
         # The histogram inlines the distribution; "N distinct" is implied, so
         # it is omitted to avoid restating the obvious.
-        summary.append(format_value_counts(full_histogram))
+        values = format_value_counts(full_histogram)
+        summary.append(f"≈{values}" if conn.dialect.name == "bigquery" else values)
     elif distinct_count is not None:
         # "all distinct" means every present (non-null) value is unique. The
         # right baseline is the non-null count; we only fall back to total rows
@@ -168,12 +192,15 @@ def profile_column(
         # total then still correctly implies no nulls). Any nulls are reported
         # normally, e.g. ``all distinct, nulls=8``. It is implied by
         # "unique identifier", so it is suppressed there to avoid restating it.
-        distinct_base = non_nulls if non_nulls is not None else total_rows
-        if distinct_count == distinct_base:
-            if not unique_identifier:
-                summary.append("all distinct")
+        if conn.dialect.name == "bigquery":
+            summary.append(f"≈{distinct_count} distinct")
         else:
-            summary.append(f"{distinct_count} distinct")
+            distinct_base = non_nulls if non_nulls is not None else total_rows
+            if distinct_count == distinct_base:
+                if not unique_identifier:
+                    summary.append("all distinct")
+            else:
+                summary.append(f"{distinct_count} distinct")
     elif catalog_stat is not None and catalog_stat.distinct is not None:
         summary.append(f"≈{catalog_stat.distinct} distinct")
     if nulls is not None:
@@ -201,6 +228,13 @@ def profile_column(
         if full_histogram is not None:
             # Already inlined on the column header; no separate line.
             top_values = full_histogram
+        elif conn.dialect.name == "bigquery" and approximate_top_values:
+            lines.append(
+                continuation_line(
+                    "top_values",
+                    f"≈{format_value_counts(approximate_top_values[:10])}",
+                )
+            )
         elif total_rows <= 100_000 and indexed:
             with query_timeout.metric(skipped, "top values"):
                 top_values = get_value_counts(
@@ -208,7 +242,11 @@ def profile_column(
                 )
                 if top_values and top_values[0][1] > 1:
                     lines.append(
-                        continuation_line("top_values", format_value_counts(top_values))
+                        continuation_line(
+                            "top_values",
+                            ("≈" if conn.dialect.name == "bigquery" else "")
+                            + format_value_counts(top_values),
+                        )
                     )
         elif total_rows > 100_000 and indexed:
             top_values = (
@@ -233,22 +271,26 @@ def profile_column(
             if array_line:
                 lines.append(array_line)
 
-    lines.extend(_skipped_metric_lines(skipped, timeout_seconds))
+    lines.extend(skipped_metric_lines(skipped))
     return lines
 
 
-def _skipped_metric_lines(skipped: list[str], timeout_seconds: int) -> list[str]:
-    if not skipped or timeout_seconds <= 0:
-        return []
+def skipped_metric_lines(skipped: list[tuple[str, str]]) -> list[str]:
     return [
-        continuation_line(metric, f"skipped (query timeout > {timeout_seconds}s)")
-        for metric in skipped
+        continuation_line(metric, f"skipped ({reason})") for metric, reason in skipped
     ]
 
 
 def median_value(
     conn: Connection, table: Table, column: Any, timeout_seconds: int = 0
 ) -> Any:
+    if conn.dialect.name == "bigquery":
+        quantiles = query_timeout.execute(
+            conn,
+            select(func.approx_quantiles(column, 2)).where(column.is_not(None)),
+            timeout_seconds,
+        ).scalar_one()
+        return quantiles[1] if quantiles else None
     if conn.dialect.name == "postgresql":
         return query_timeout.execute(
             conn,
@@ -295,6 +337,15 @@ def get_value_counts(
     limit: int | None,
     timeout_seconds: int = 0,
 ) -> list[tuple[Any, int]]:
+    if conn.dialect.name == "bigquery":
+        values = query_timeout.execute(
+            conn,
+            select(func.approx_top_count(column, limit or 20)).where(
+                column.is_not(None)
+            ),
+            timeout_seconds,
+        ).scalar_one()
+        return _bigquery_value_counts(values)
     statement = (
         select(column, func.count().label("value_count"))
         .select_from(table)
@@ -306,6 +357,15 @@ def get_value_counts(
         statement = statement.limit(limit)
     rows = query_timeout.execute(conn, statement, timeout_seconds)
     return [(row[0], int(row[1])) for row in rows]
+
+
+def _bigquery_value_counts(values: Any) -> list[tuple[Any, int]]:
+    return [
+        (item["value"], int(item["count"]))
+        if isinstance(item, dict)
+        else (item[0], int(item[1]))
+        for item in (values or [])
+    ]
 
 
 def get_unique_column_names(table: Table) -> set[str]:

@@ -23,12 +23,14 @@ from db_snooper.profiling.tables import (
     resolve_table_size,
 )
 from db_snooper.profiling.utility_dump import dump_create_table
+from db_snooper.query_timeout import BigQueryBudget
 
 
 def profile_schema(
     engine: Engine,
     plan: SchemaProfilePlan,
     progress: ProfileProgress | None = None,
+    bigquery_budget: BigQueryBudget | None = None,
 ) -> str:
     options = plan.options
     tables = list(plan.table_names)
@@ -63,6 +65,7 @@ def profile_schema(
 
     with engine.connect() as conn:
         query_timeout.apply_query_timeout(conn, options.query_timeout)
+        query_timeout.apply_bigquery_budget(conn, bigquery_budget)
         accessible = set(permission_report.accessible_tables)
         tables = [table for table in tables if table in accessible]
         if not tables:
@@ -201,6 +204,7 @@ def profile_schema(
                     options,
                     report_column=report_column,
                     size_info=size_info,
+                    allow_table_sample=kind == OBJECT_TABLE,
                 )
 
                 if table_profile is not None:

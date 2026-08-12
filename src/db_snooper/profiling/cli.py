@@ -70,6 +70,32 @@ def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--max-bytes-billed",
+        type=int,
+        default=_DEFAULTS.max_bytes_billed,
+        help=(
+            "Cumulative BigQuery scan budget in bytes. Queries are dry-run first and "
+            "skipped when they would exceed the remaining budget; 0 disables. "
+            f"Default {_DEFAULTS.max_bytes_billed}."
+        ),
+    )
+    parser.add_argument(
+        "--random-sample-percent",
+        type=float,
+        default=_DEFAULTS.random_sample_percent,
+        help=(
+            "Table percentage used by native BigQuery/PostgreSQL random sampling; "
+            f"0 disables. Default {_DEFAULTS.random_sample_percent}."
+        ),
+    )
+    parser.add_argument(
+        "--metadata-only",
+        action="store_true",
+        help=(
+            "Emit schema, row estimates, and catalog statistics without scanning rows."
+        ),
+    )
+    parser.add_argument(
         "--per-table",
         action="store_true",
         help="Write one .md profile per table instead of one schema profile.",
@@ -111,6 +137,10 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         parser.error("--large-table-threshold must be a positive integer")
     if args.query_timeout < 0:
         parser.error("--query-timeout must be a non-negative integer")
+    if args.max_bytes_billed < 0:
+        parser.error("--max-bytes-billed must be a non-negative integer")
+    if not 0 <= args.random_sample_percent <= 100:
+        parser.error("--random-sample-percent must be between 0 and 100")
     url = resolve_database_url(args, parser)
 
     options = ProfileOptions(
@@ -119,6 +149,9 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         random_row_limit=args.random_row_limit,
         large_table_threshold=args.large_table_threshold,
         query_timeout=args.query_timeout,
+        max_bytes_billed=args.max_bytes_billed,
+        random_sample_percent=args.random_sample_percent,
+        metadata_only=args.metadata_only,
         include_tables=parse_table_set(args.include_tables),
         exclude_tables=parse_table_set(args.exclude_tables) or frozenset(),
         schema=resolve_schema(args),

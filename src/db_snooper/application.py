@@ -16,6 +16,7 @@ from db_snooper.permissions import check_permissions
 from db_snooper.profiling.core import profile_schema
 from db_snooper.profiling.discovery import list_schema_tables
 from db_snooper.profiling.suggestions import profile_suggestions
+from db_snooper.query_timeout import BigQueryBudget
 
 
 def build_schema_plan(engine: Engine, options: ProfileOptions) -> SchemaProfilePlan:
@@ -38,7 +39,10 @@ def profile_database(
     options: ProfileOptions,
     progress: ProfileProgress | None = None,
 ) -> str:
-    return profile_schema(engine, build_schema_plan(engine, options), progress)
+    budget = BigQueryBudget(options.max_bytes_billed)
+    return profile_schema(
+        engine, build_schema_plan(engine, options), progress, bigquery_budget=budget
+    )
 
 
 def run_profiles(
@@ -50,6 +54,7 @@ def run_profiles(
     documents: list[ProfileDocument] = []
     warnings: list[str] = []
     reports = []
+    bigquery_budget = BigQueryBudget(options.max_bytes_billed)
     for schema in list_schemas(engine, options.schema):
         schema_options = replace(options, schema=schema)
         plan = build_schema_plan(engine, schema_options)
@@ -79,7 +84,12 @@ def run_profiles(
                     ProfileDocument(
                         schema=schema,
                         table=table_name,
-                        markdown=profile_schema(engine, table_plan, schema_progress),
+                        markdown=profile_schema(
+                            engine,
+                            table_plan,
+                            schema_progress,
+                            bigquery_budget=bigquery_budget,
+                        ),
                     )
                 )
         else:
@@ -87,7 +97,12 @@ def run_profiles(
                 ProfileDocument(
                     schema=schema,
                     table=None,
-                    markdown=profile_schema(engine, plan, schema_progress),
+                    markdown=profile_schema(
+                        engine,
+                        plan,
+                        schema_progress,
+                        bigquery_budget=bigquery_budget,
+                    ),
                 )
             )
 

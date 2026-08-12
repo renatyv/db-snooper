@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import Table, desc, func, select
+from sqlalchemy import Table, desc, func, select, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -25,6 +25,7 @@ from db_snooper.profiling.columns import (
     json_dumps,
     jsonable,
     profile_column,
+    skipped_metric_lines,
 )
 from db_snooper.shared import is_sensitive
 
@@ -167,7 +168,7 @@ class TableSizeInfo:
     total_rows: int | None
     estimate: int | None
     is_large: bool
-    timed_out: bool
+    skip_reason: str | None = None
 
     @property
     def is_empty(self) -> bool:
@@ -180,7 +181,7 @@ class TableSizeInfo:
         schema, so the CREATE TABLE is still required (when the table is
         included at all).
         """
-        if self.total_rows is None or self.is_large or self.timed_out:
+        if self.total_rows is None or self.is_large or self.skip_reason:
             return False
         if self.total_rows == 0:
             return False
@@ -192,25 +193,35 @@ def resolve_table_size(
 ) -> TableSizeInfo:
     """Determine a table's row count once so DDL and profiling decisions share it."""
     estimate = estimate_row_count(conn, table)
+    if options.metadata_only:
+        if estimate is None:
+            return TableSizeInfo(
+                total_rows=None,
+                estimate=None,
+                is_large=False,
+                skip_reason="metadata-only; catalog row estimate unavailable",
+            )
+        return TableSizeInfo(total_rows=None, estimate=estimate, is_large=True)
     if estimate is not None and estimate >= options.large_table_threshold:
-        return TableSizeInfo(
-            total_rows=None, estimate=estimate, is_large=True, timed_out=False
-        )
+        return TableSizeInfo(total_rows=None, estimate=estimate, is_large=True)
     if conn.dialect.name == "bigquery" and estimate is not None:
-        return TableSizeInfo(
-            total_rows=estimate, estimate=estimate, is_large=False, timed_out=False
-        )
+        return TableSizeInfo(total_rows=estimate, estimate=estimate, is_large=False)
     try:
         total_rows = query_timeout.execute(
             conn, select(func.count()).select_from(table), options.query_timeout
         ).scalar_one()
     except query_timeout.QueryTimeout:
         return TableSizeInfo(
-            total_rows=None, estimate=estimate, is_large=False, timed_out=True
+            total_rows=None,
+            estimate=estimate,
+            is_large=False,
+            skip_reason=f"row count query timeout > {options.query_timeout}s",
         )
-    return TableSizeInfo(
-        total_rows=total_rows, estimate=estimate, is_large=False, timed_out=False
-    )
+    except query_timeout.QueryBudgetExceeded as exc:
+        return TableSizeInfo(
+            total_rows=None, estimate=estimate, is_large=False, skip_reason=str(exc)
+        )
+    return TableSizeInfo(total_rows=total_rows, estimate=estimate, is_large=False)
 
 
 def profile_table_from_stats(
@@ -324,20 +335,21 @@ def profile_table(
     options: ProfileOptions,
     report_column: Callable[[str], None] | None = None,
     size_info: TableSizeInfo | None = None,
+    allow_table_sample: bool = True,
 ) -> TableProfile:
     if size_info is None:
         size_info = resolve_table_size(conn, table, options)
     if size_info.is_large:
         return profile_table_from_stats(conn, table, size_info.estimate)
-    if size_info.timed_out:
+    if size_info.skip_reason:
         return TableProfile(
             rows_heading=None,
-            rows_lines=[f"- {table.name}: skipped (row count query timeout)"],
+            rows_lines=[f"- {table.name}: skipped ({size_info.skip_reason})"],
             columns_lines=[],
         )
     total_rows = size_info.total_rows
     if total_rows is None:
-        # Unreachable: is_large/timed_out return early above.
+        # Unreachable: is_large/skip_reason return early above.
         return TableProfile(
             rows_heading=None,
             rows_lines=[f"- {table.name}: skipped (row count unavailable)"],
@@ -374,16 +386,31 @@ def profile_table(
     # Larger table: total + latest + random rows in one transposed table,
     # then per-column profiles.
     rows_lines = [f"- total={total_rows}"]
+    row_skips: list[tuple[str, str]] = []
     latest: list[dict[str, Any]] = []
-    with query_timeout.metric([], "latest rows"):
+    with query_timeout.metric(row_skips, "latest rows"):
         latest = latest_rows(
             conn, table, options.latest_row_limit, options.query_timeout
         )
     random_sample: list[dict[str, Any]] = []
-    with query_timeout.metric([], "random rows"):
-        random_sample = random_rows(
-            conn, table, options.random_row_limit, options.query_timeout
+    dialect = conn.dialect.name
+    if dialect in {"mysql", "mariadb"}:
+        row_skips.append(("random rows", "disabled to avoid ORDER BY RAND()"))
+    elif dialect in {"bigquery", "postgresql"} and not allow_table_sample:
+        row_skips.append(
+            ("random rows", "native table sampling is unavailable for views")
         )
+    elif options.random_sample_percent <= 0:
+        row_skips.append(("random rows", "disabled by --random-sample-percent=0"))
+    else:
+        with query_timeout.metric(row_skips, "random rows"):
+            random_sample = random_rows(
+                conn,
+                table,
+                options.random_row_limit,
+                options.query_timeout,
+                options.random_sample_percent,
+            )
 
     combined = list(latest) + list(random_sample)
     labels = ["latest"] * len(latest) + ["sample"] * len(random_sample)
@@ -392,6 +419,9 @@ def profile_table(
         rows_lines.extend(_format_rows_table(column_names, combined, labels))
     else:
         rows_lines.append("- (no rows sampled)")
+    if row_skips:
+        rows_lines.append("")
+        rows_lines.extend(skipped_metric_lines(row_skips))
 
     unique_columns = get_unique_column_names(table)
     indexed_columns = get_indexed_column_names(table)
@@ -457,12 +487,27 @@ def _order_columns(conn: Connection, table: Table) -> list[Any]:
 
 
 def random_rows(
-    conn: Connection, table: Table, limit: int, timeout_seconds: int = 0
+    conn: Connection,
+    table: Table,
+    limit: int,
+    timeout_seconds: int = 0,
+    sample_percent: float = 0.1,
 ) -> list[dict[str, Any]]:
+    if conn.dialect.name == "bigquery":
+        qualified = conn.dialect.identifier_preparer.format_table(table)
+        statement = text(
+            f"SELECT * FROM {qualified} TABLESAMPLE SYSTEM "
+            f"({sample_percent:g} PERCENT) LIMIT {limit}"
+        )
+        return rows_for_statement(conn, table, statement, timeout_seconds)
+    if conn.dialect.name == "postgresql":
+        sampled = table.tablesample(sample_percent)
+        statement = select(
+            *(sampled.c[column.name].label(column.name) for column in table.columns)
+        ).limit(limit)
+        return rows_for_statement(conn, table, statement, timeout_seconds)
     random_function = (
-        func.rand()
-        if conn.dialect.name in {"bigquery", "mysql", "mariadb"}
-        else func.random()
+        func.rand() if conn.dialect.name in {"mysql", "mariadb"} else func.random()
     )
     statement = select(table).order_by(random_function).limit(limit)
     return rows_for_statement(conn, table, statement, timeout_seconds)

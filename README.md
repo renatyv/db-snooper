@@ -157,6 +157,9 @@ Profile options:
 - `--latest-row-limit 1`: most-recent rows (by key) shown for larger tables.
 - `--random-row-limit 2`: random rows shown for larger tables.
 - `--large-table-threshold 100000000`: tables whose catalog row estimate is at/above this count are profiled from internal database stats only. `COUNT(*)`, sampled rows, and per-column queries are skipped because they would be too slow on hundreds of millions of rows. Instead, each column is summarized from the engine's catalog statistics (approximate null fraction, distinct count, numeric min/max, and top values), marked with `≈`/`(from db stats)`.
+- `--metadata-only`: emit schema, relationships, row estimates, and available catalog statistics without scanning table rows.
+- `--max-bytes-billed 1073741824`: cumulative BigQuery scan budget. Each profiling query is dry-run first and skipped if it would exceed the remaining budget; `0` disables the cap.
+- `--random-sample-percent 0.1`: percentage used by native BigQuery/PostgreSQL table sampling; `0` disables random samples. MySQL/MariaDB random sampling is disabled to avoid a full `ORDER BY RAND()`.
 - `--include-tables table_a,table_b`: only profile selected tables.
 - `--exclude-tables table_c`: skip selected tables.
 - `--include-technical-tables`: profile migration/framework tables (e.g. `schema_migrations`, `alembic_version`, `flyway_schema_history`, `django_migrations`) that are skipped by default.
