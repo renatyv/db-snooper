@@ -7,7 +7,7 @@
 
 **Spec: [`spec/profiler.md`](spec/profiler.md)**
 
-DB Snooper generates compact, LLM-ready database context for SQL generation, query debugging, and schema exploration. Profiling alone drives state-of-the-art text-to-SQL accuracy ([Automatic Metadata Extraction for Text-to-SQL](https://arxiv.org/abs/2505.19988)). Supports SQLite, PostgreSQL, MySQL, MariaDB, DuckDB, and Google BigQuery. Requires Python ≥ 3.10.
+DB Snooper generates compact, LLM-ready database context for SQL generation, query debugging, and schema exploration. Profiling alone drives state-of-the-art text-to-SQL accuracy ([Automatic Metadata Extraction for Text-to-SQL](https://arxiv.org/abs/2505.19988)). Supports SQLite, PostgreSQL, MySQL, MariaDB, DuckDB, Google BigQuery, and Amazon RDS for PostgreSQL/MySQL/MariaDB. Requires Python ≥ 3.10.
 
 It inspects an existing database and produces a Markdown profile (`<database>/<schema>.md`): DDL, row counts, sampled rows, and per-column summaries. Use `--per-table` for one `.md` per table.
 
@@ -68,6 +68,23 @@ db-snooper profile --db-type mysql --database app_db --user readonly_user --host
 db-snooper profile --db-type mariadb --database app_db --user readonly_user --host localhost --port 3306 --ask-password
 ```
 
+### Amazon RDS
+
+RDS uses the matching PostgreSQL, MySQL, or MariaDB type. Download the [Amazon RDS CA bundle](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html), then connect with a database password:
+
+```bash
+db-snooper profile --db-type postgres --database app_db --user readonly_user \
+  --host mydb.123456789012.eu-west-1.rds.amazonaws.com --ssl-ca global-bundle.pem --ask-password
+```
+
+Or use IAM database authentication with a configured AWS CLI:
+
+```bash
+db-snooper profile --db-type postgres --database app_db --user readonly_user \
+  --host mydb.123456789012.eu-west-1.rds.amazonaws.com --ssl-ca global-bundle.pem \
+  --rds-iam --aws-region eu-west-1
+```
+
 ### DuckDB
 ```bash
 db-snooper profile --db-type duckdb --database warehouse.duckdb --schema sch
@@ -109,6 +126,7 @@ Supported variables:
 - `DB_SNOOPER_DB_PORT`
 - `DB_SNOOPER_DB_USER`
 - `DB_SNOOPER_DB_PASSWORD`
+- `DB_SNOOPER_SSL_CA`
 - `DB_SNOOPER_SCHEMA`
 
 For server databases, `--host` defaults to `localhost`, `--port` defaults to the database default, and DB Snooper securely prompts for a password when `DB_SNOOPER_DB_PASSWORD` is not set.

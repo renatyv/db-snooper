@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import getpass
 import os
+import subprocess
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import inspect
@@ -64,6 +66,26 @@ def add_connection_arguments(parser: argparse.ArgumentParser) -> None:
         help="Prompt securely for the database password.",
     )
     parser.add_argument(
+        "--ssl-ca",
+        default=None,
+        help="CA bundle for verified PostgreSQL/MySQL/MariaDB TLS. Defaults to DB_SNOOPER_SSL_CA.",
+    )
+    parser.add_argument(
+        "--rds-iam",
+        action="store_true",
+        help="Use Amazon RDS IAM authentication via the AWS CLI instead of a password.",
+    )
+    parser.add_argument(
+        "--aws-region",
+        default=None,
+        help="AWS Region for RDS IAM authentication. Defaults to AWS CLI configuration.",
+    )
+    parser.add_argument(
+        "--aws-profile",
+        default=None,
+        help="AWS CLI profile for RDS IAM authentication.",
+    )
+    parser.add_argument(
         "--schema",
         default=None,
         help="Schema to inspect. Defaults to DB_SNOOPER_SCHEMA; without either, all user schemas are inspected.",
@@ -88,6 +110,14 @@ def resolve_database_url(
     if not database:
         parser.error("--database or DB_SNOOPER_DATABASE is required")
 
+    ssl_ca = _value(args, "ssl_ca", "DB_SNOOPER_SSL_CA")
+    if args.rds_iam and db_type not in {"postgres", "mysql", "mariadb"}:
+        parser.error("--rds-iam requires PostgreSQL, MySQL, or MariaDB")
+    if ssl_ca and db_type not in {"postgres", "mysql", "mariadb"}:
+        parser.error("--ssl-ca requires PostgreSQL, MySQL, or MariaDB")
+    if ssl_ca and not Path(ssl_ca).is_file():
+        parser.error(f"SSL CA bundle does not exist: {ssl_ca}")
+
     if db_type in {"sqlite", "duckdb"}:
         return URL.create(DRIVER_NAMES[db_type], database=database)
     if db_type == "bigquery":
@@ -99,9 +129,29 @@ def resolve_database_url(
         or DEFAULT_PORTS[db_type]
     )
     user = _value(args, "user", "DB_SNOOPER_DB_USER")
-    password = _value(args, "password", "DB_SNOOPER_DB_PASSWORD")
-    if args.ask_password or password is None:
+    if args.rds_iam:
+        if not user:
+            parser.error("--user is required with --rds-iam")
+        if host == "localhost":
+            parser.error("--host must be an Amazon RDS endpoint with --rds-iam")
+        if not ssl_ca:
+            parser.error("--ssl-ca is required with --rds-iam")
+        password = _rds_iam_token(args, parser, host, port, user)
+    else:
+        password = _value(args, "password", "DB_SNOOPER_DB_PASSWORD")
+    if not args.rds_iam and (args.ask_password or password is None):
         password = getpass.getpass("Database password: ")
+
+    query: dict[str, str] = {}
+    if ssl_ca:
+        if db_type == "postgres":
+            query = {"sslmode": "verify-full", "sslrootcert": ssl_ca}
+        else:
+            query = {
+                "ssl_ca": ssl_ca,
+                "ssl_verify_cert": "true",
+                "ssl_verify_identity": "true",
+            }
     return URL.create(
         DRIVER_NAMES[db_type],
         username=user,
@@ -109,7 +159,42 @@ def resolve_database_url(
         host=host,
         port=port,
         database=database,
+        query=query,
     )
+
+
+def _rds_iam_token(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+    host: str,
+    port: int,
+    user: str,
+) -> str:
+    command = [
+        "aws",
+        "rds",
+        "generate-db-auth-token",
+        "--hostname",
+        host,
+        "--port",
+        str(port),
+        "--username",
+        user,
+    ]
+    if args.aws_region:
+        command.extend(("--region", args.aws_region))
+    if args.aws_profile:
+        command.extend(("--profile", args.aws_profile))
+    try:
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+    except FileNotFoundError:
+        parser.error("--rds-iam requires the AWS CLI")
+    except subprocess.CalledProcessError as exc:
+        parser.error(f"could not generate an RDS IAM token: {exc.stderr.strip()}")
+    token = result.stdout.strip()
+    if not token:
+        parser.error("AWS CLI returned an empty RDS IAM token")
+    return token
 
 
 def resolve_schema(args: argparse.Namespace) -> str | None:

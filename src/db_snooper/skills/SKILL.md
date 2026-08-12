@@ -19,7 +19,7 @@ Use this skill to generate a compact, LLM-ready schema and data profile of an ex
 
 ## Connection And Options
 
-db-snooper supports SQLite, PostgreSQL, MySQL, MariaDB, DuckDB, and Google BigQuery (all drivers ship with the base install; no extra is needed).
+db-snooper supports SQLite, PostgreSQL, MySQL, MariaDB, DuckDB, Google BigQuery, and Amazon RDS for PostgreSQL/MySQL/MariaDB (all database drivers ship with the base install; RDS IAM authentication uses the AWS CLI).
 
 Run the profiler with `uvx` (no install needed). PostgreSQL example:
 
