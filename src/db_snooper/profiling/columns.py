@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import logging
 from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
@@ -20,10 +19,7 @@ from sqlalchemy.sql.sqltypes import (
 )
 
 from db_snooper import query_timeout
-from db_snooper.database_stats import get_catalog_column_stats
 from db_snooper.shared import is_sensitive
-
-_logger = logging.getLogger("db_snooper")
 
 # JSON/JSONB profiling gates: keep key extraction bounded so a single oversized
 # value or a very large table cannot hang the profile.
@@ -48,10 +44,12 @@ def profile_column(
     nulls: int | None = None
     skipped: list[str] = []
     if counts_available:
-        with query_timeout.metric(conn, skipped, "null/non-null counts"):
+        with query_timeout.metric(skipped, "null/non-null counts"):
             non_nulls = int(
                 query_timeout.execute(
-                    conn, select(func.count(column)).select_from(table)
+                    conn,
+                    select(func.count(column)).select_from(table),
+                    timeout_seconds,
                 ).scalar_one()
             )
         if non_nulls is not None:
@@ -67,10 +65,12 @@ def profile_column(
     )
     distinct_count: int | None = None
     if distinct_available:
-        with query_timeout.metric(conn, skipped, "distinct count"):
+        with query_timeout.metric(skipped, "distinct count"):
             distinct_count = int(
                 query_timeout.execute(
-                    conn, select(func.count(func.distinct(column))).select_from(table)
+                    conn,
+                    select(func.count(func.distinct(column))).select_from(table),
+                    timeout_seconds,
                 ).scalar_one()
             )
 
@@ -95,8 +95,10 @@ def profile_column(
         and distinct_count is not None
         and distinct_count < 20
     ):
-        with query_timeout.metric(conn, skipped, "value counts"):
-            full_histogram = get_value_counts(conn, table, column, limit=None)
+        with query_timeout.metric(skipped, "value counts"):
+            full_histogram = get_value_counts(
+                conn, table, column, limit=None, timeout_seconds=timeout_seconds
+            )
 
     # Numeric min/max is computed first so the range can be inlined on the
     # column header (``int 5..214``); average/median and any catalog-range
@@ -106,9 +108,11 @@ def profile_column(
     if is_numeric(column):
         have_range = False
         if total_rows <= 5_000_000 or indexed:
-            with query_timeout.metric(conn, skipped, "min/max"):
+            with query_timeout.metric(skipped, "min/max"):
                 min_value, max_value = query_timeout.execute(
-                    conn, select(func.min(column), func.max(column)).select_from(table)
+                    conn,
+                    select(func.min(column), func.max(column)).select_from(table),
+                    timeout_seconds,
                 ).one()
             if min_value is not None and max_value is not None:
                 numeric_range = (
@@ -136,14 +140,18 @@ def profile_column(
         )
         if include_avg_median:
             if total_rows <= 1_000_000 or (total_rows <= 10_000_000 and indexed):
-                with query_timeout.metric(conn, skipped, "average"):
+                with query_timeout.metric(skipped, "average"):
                     average = query_timeout.execute(
-                        conn, select(func.avg(column)).select_from(table)
+                        conn,
+                        select(func.avg(column)).select_from(table),
+                        timeout_seconds,
                     ).scalar_one()
                     numeric_stats.append(f"average={format_value(average)}")
             if total_rows < 100_000:
-                with query_timeout.metric(conn, skipped, "median"):
-                    median = median_value(conn, table, column)
+                with query_timeout.metric(skipped, "median"):
+                    median = median_value(
+                        conn, table, column, timeout_seconds=timeout_seconds
+                    )
                     numeric_stats.append(f"median={format_value(median)}")
 
     summary: list[str] = []
@@ -194,13 +202,13 @@ def profile_column(
             # Already inlined on the column header; no separate line.
             top_values = full_histogram
         elif total_rows <= 100_000 and indexed:
-            with query_timeout.metric(conn, skipped, "top values"):
-                top_values = get_value_counts(conn, table, column, limit=10)
+            with query_timeout.metric(skipped, "top values"):
+                top_values = get_value_counts(
+                    conn, table, column, limit=10, timeout_seconds=timeout_seconds
+                )
                 if top_values and top_values[0][1] > 1:
                     lines.append(
-                        continuation_line(
-                            "top_values", format_value_counts(top_values)
-                        )
+                        continuation_line("top_values", format_value_counts(top_values))
                     )
         elif total_rows > 100_000 and indexed:
             top_values = (
@@ -208,18 +216,20 @@ def profile_column(
             )
             if top_values:
                 lines.append(
-                    continuation_line(
-                        "top_values", format_value_counts(top_values)
-                    )
+                    continuation_line("top_values", format_value_counts(top_values))
                 )
     # Type-specific profiling for container/LOB types that cannot be DISTINCTed.
     if not sensitive and not unique_identifier:
         if is_json(column):
-            json_line = profile_json_column(conn, table, column, total_rows)
+            json_line = profile_json_column(
+                conn, table, column, total_rows, timeout_seconds
+            )
             if json_line:
                 lines.append(json_line)
         elif is_array(column):
-            array_line = profile_array_column(conn, table, column, total_rows, indexed)
+            array_line = profile_array_column(
+                conn, table, column, total_rows, indexed, timeout_seconds
+            )
             if array_line:
                 lines.append(array_line)
 
@@ -227,9 +237,7 @@ def profile_column(
     return lines
 
 
-def _skipped_metric_lines(
-    skipped: list[str], timeout_seconds: int
-) -> list[str]:
+def _skipped_metric_lines(skipped: list[str], timeout_seconds: int) -> list[str]:
     if not skipped or timeout_seconds <= 0:
         return []
     return [
@@ -238,19 +246,23 @@ def _skipped_metric_lines(
     ]
 
 
-def median_value(conn: Connection, table: Table, column: Any) -> Any:
+def median_value(
+    conn: Connection, table: Table, column: Any, timeout_seconds: int = 0
+) -> Any:
     if conn.dialect.name == "postgresql":
         return query_timeout.execute(
             conn,
             select(func.percentile_cont(0.5).within_group(column)).where(
                 column.is_not(None)
             ),
+            timeout_seconds,
         ).scalar_one()
     if conn.dialect.name == "mariadb":
         percentile = func.percentile_cont(0.5).within_group(column).over()
         return query_timeout.execute(
             conn,
             select(percentile).select_from(table).where(column.is_not(None)).limit(1),
+            timeout_seconds,
         ).scalar_one()
 
     ordered = (
@@ -272,11 +284,16 @@ def median_value(conn: Connection, table: Table, column: Any) -> Any:
                 ]
             )
         ),
+        timeout_seconds,
     ).scalar_one()
 
 
 def get_value_counts(
-    conn: Connection, table: Table, column: Any, limit: int | None
+    conn: Connection,
+    table: Table,
+    column: Any,
+    limit: int | None,
+    timeout_seconds: int = 0,
 ) -> list[tuple[Any, int]]:
     statement = (
         select(column, func.count().label("value_count"))
@@ -287,18 +304,8 @@ def get_value_counts(
     )
     if limit is not None:
         statement = statement.limit(limit)
-    rows = query_timeout.execute(conn, statement)
+    rows = query_timeout.execute(conn, statement, timeout_seconds)
     return [(row[0], int(row[1])) for row in rows]
-
-
-def get_catalog_top_values(
-    conn: Connection, table: Table, column: Any, total_rows: int
-) -> list[tuple[Any, int]]:
-    # Delegates to the shared catalog reader, which covers PostgreSQL pg_stats,
-    # MySQL singleton/equi-height histograms, and MariaDB mysql.column_stats.
-    stats = get_catalog_column_stats(conn, table, total_rows)
-    stat = stats.get(column.name)
-    return list(stat.top_values) if stat else []
 
 
 def get_unique_column_names(table: Table) -> set[str]:
@@ -347,7 +354,11 @@ def is_distinct_supported(column: Any) -> bool:
 
 
 def profile_json_column(
-    conn: Connection, table: Table, column: Any, total_rows: int
+    conn: Connection,
+    table: Table,
+    column: Any,
+    total_rows: int,
+    timeout_seconds: int = 0,
 ) -> str | None:
     """Emit top-level JSON key frequencies, bounded by row-count and size gates."""
     if total_rows > JSON_PROFILE_ROW_LIMIT:
@@ -361,6 +372,7 @@ def profile_json_column(
             .select_from(table)
             .where(column.is_not(None))
             .limit(JSON_SAMPLE_LIMIT),
+            timeout_seconds,
         )
         for (value,) in rows:
             sampled += 1
@@ -372,16 +384,6 @@ def profile_json_column(
                 key_counts[key] = key_counts.get(key, 0) + 1
     except query_timeout.QueryTimeout:
         return None
-    except Exception as exc:
-        query_timeout.recover_connection(conn)
-        _logger.debug(
-            "JSON key profile for %s.%s skipped: %r",
-            table.name,
-            column.name,
-            exc,
-            exc_info=True,
-        )
-        return None
     if not key_counts or sampled == 0:
         return None
     ordered = sorted(key_counts.items(), key=lambda item: (-item[1], item[0]))
@@ -390,7 +392,12 @@ def profile_json_column(
 
 
 def profile_array_column(
-    conn: Connection, table: Table, column: Any, total_rows: int, indexed: bool
+    conn: Connection,
+    table: Table,
+    column: Any,
+    total_rows: int,
+    indexed: bool,
+    timeout_seconds: int = 0,
 ) -> str | None:
     """Emit min/avg/max element counts for an ARRAY column."""
     if not (total_rows <= 5_000_000 or indexed):
@@ -406,18 +413,9 @@ def profile_array_column(
                 func.avg(length_expr),
                 func.max(length_expr),
             ).select_from(table),
+            timeout_seconds,
         ).one()
     except query_timeout.QueryTimeout:
-        return None
-    except Exception as exc:
-        query_timeout.recover_connection(conn)
-        _logger.debug(
-            "array length profile for %s.%s skipped: %r",
-            table.name,
-            column.name,
-            exc,
-            exc_info=True,
-        )
         return None
     if min_len is None and avg_len is None and max_len is None:
         return None

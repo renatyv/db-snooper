@@ -1,15 +1,10 @@
 from __future__ import annotations
 
-import logging
 from contextlib import contextmanager
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
-
-DEFAULT_QUERY_TIMEOUT = 10
-
-_logger = logging.getLogger("db_snooper")
 
 _TIMEOUT_DIALECTS = {"postgresql", "mysql"}
 
@@ -24,14 +19,7 @@ class QueryTimeout(Exception):
 
 
 def apply_query_timeout(conn: Connection, seconds: int) -> None:
-    """Configure a server-side statement timeout for this connection.
-
-    Best-effort and a no-op for dialects without native support (sqlite, duckdb)
-    or when ``seconds <= 0``. The chosen value is cached on the connection so it
-    can be restored after a rollback (PostgreSQL reverts session ``SET`` on
-    transaction rollback, and recovering from a timeout requires one).
-    """
-    conn.info["query_timeout_seconds"] = seconds
+    """Best-effort server-side statement timeout for this connection."""
     _set_session_timeout(conn, seconds)
 
 
@@ -52,12 +40,9 @@ def _set_session_timeout(conn: Connection, seconds: int) -> None:
 
 def _apply_mysql_timeout(conn: Connection, seconds: int) -> None:
     context = {"ms": seconds * 1000, "seconds": seconds}
-    cached = conn.info.get("mysql_timeout_template")
-    templates = (cached,) if cached else _MYSQL_TIMEOUT_STATEMENTS
-    for template in templates:
+    for template in _MYSQL_TIMEOUT_STATEMENTS:
         try:
             conn.execute(text(template.format(**context)))
-            conn.info["mysql_timeout_template"] = template
             return
         except SQLAlchemyError:
             continue
@@ -92,7 +77,7 @@ def _orig_error_code(orig: object | None) -> str | None:
     return None
 
 
-def execute(conn: Connection, statement: object):
+def execute(conn: Connection, statement: object, timeout_seconds: int = 0):
     """Execute ``statement`` via the connection.
 
     On a server-side timeout the (read-only) transaction is rolled back, the
@@ -105,42 +90,14 @@ def execute(conn: Connection, statement: object):
         if not is_query_timeout(exc):
             raise
         conn.rollback()
-        _set_session_timeout(conn, conn.info.get("query_timeout_seconds", 0))
+        _set_session_timeout(conn, timeout_seconds)
         raise QueryTimeout(f"query exceeded timeout: {exc.orig!r}") from exc
 
 
-def recover_connection(conn: Connection) -> None:
-    """Roll back the active transaction and restore the cached statement timeout.
-
-    PostgreSQL aborts the whole transaction after any error ("current transaction
-    is aborted, commands ignored until end of transaction block"); recovering
-    from a non-timeout metric error requires an explicit rollback before the next
-    query can run.
-    """
-    try:
-        conn.rollback()
-    except SQLAlchemyError:
-        pass
-    _set_session_timeout(conn, conn.info.get("query_timeout_seconds", 0))
-
-
 @contextmanager
-def metric(conn: Connection, skipped: list[str], metric_name: str):
-    """Run a single profiling metric, skipping it on any error.
-
-    A server-side timeout is recorded in ``skipped`` (the timeout itself is
-    recovered inside :func:`execute`). Any other exception (type error,
-    unsupported aggregation such as ``COUNT(DISTINCT jsonb_col)``, permission
-    quirk, ...) also rolls back the transaction, restores the statement timeout,
-    records the skip, and lets profiling continue.
-    """
+def metric(skipped: list[str], metric_name: str):
+    """Record expected query timeouts; unexpected errors bubble to the workflow."""
     try:
         yield
     except QueryTimeout:
         skipped.append(metric_name)
-    except Exception as exc:
-        recover_connection(conn)
-        skipped.append(metric_name)
-        _logger.debug(
-            "profiling metric %r skipped: %r", metric_name, exc, exc_info=True
-        )

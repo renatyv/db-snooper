@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import os
 import re
 import shutil
@@ -8,9 +7,7 @@ import subprocess
 
 from sqlalchemy.engine import URL
 
-from db_snooper.profiling.tables import TableDdl, compact_index_sql
-
-_logger = logging.getLogger("db_snooper")
+from db_snooper.profiling.ddl import TableDdl, compact_index_sql
 
 _UTILITY_FOR_DIALECT: dict[str, str] = {
     "postgresql": "pg_dump",
@@ -38,41 +35,19 @@ def dump_create_table(
     table_name: str,
     schema: str | None,
 ) -> TableDdl | None:
-    """Return normalized CREATE TABLE DDL + compact indexes, or None on failure.
-
-    Never raises: a missing binary, non-zero exit, parse miss, or subprocess
-    error all return None so the caller can skip the table safely.
-    """
+    """Return normalized CREATE TABLE DDL + compact indexes when available."""
     binary_name = dump_utility_name(dialect_name)
     if binary_name is None:
-        _logger.debug(
-            "No dump utility for dialect %r (table %s)", dialect_name, table_name
-        )
         return None
     binary = shutil.which(binary_name)
     if binary is None:
-        _logger.warning(
-            "%s not found on PATH; cannot dump CREATE TABLE for %s",
-            binary_name,
-            table_name,
-        )
         return None
-    try:
-        if binary_name == "pg_dump":
-            cmd = _build_pg_dump_cmd(binary, url, table_name, schema)
-        else:
-            cmd = _build_mysqldump_cmd(binary, url, table_name)
-        sql = _run(cmd, url, binary_name)
-    except Exception as exc:
-        _logger.warning(
-            "Dump utility %s failed for table %s: %r",
-            binary_name,
-            table_name,
-            exc,
-        )
-        return None
-    if sql is None:
-        return None
+    cmd = (
+        _build_pg_dump_cmd(binary, url, table_name, schema)
+        if binary_name == "pg_dump"
+        else _build_mysqldump_cmd(binary, url, table_name)
+    )
+    sql = _run(cmd, url, binary_name)
     return _normalize(sql)
 
 
@@ -129,7 +104,7 @@ def _build_mysqldump_cmd(binary: str, url: URL, table_name: str) -> list[str]:
     return cmd
 
 
-def _run(cmd: list[str], url: URL, binary_name: str) -> str | None:
+def _run(cmd: list[str], url: URL, binary_name: str) -> str:
     env = dict(os.environ)
     password = url.password
     if password is not None:
@@ -144,14 +119,7 @@ def _run(cmd: list[str], url: URL, binary_name: str) -> str | None:
         timeout=_DUMP_TIMEOUT_SECONDS,
         env=env,
     )
-    if completed.returncode != 0:
-        _logger.warning(
-            "%s exited with code %s while dumping a table; stderr: %s",
-            binary_name,
-            completed.returncode,
-            completed.stderr.strip(),
-        )
-        return None
+    completed.check_returncode()
     return completed.stdout
 
 

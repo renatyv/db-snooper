@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from db_snooper.permissions import PermissionReport
+from db_snooper.contracts import PermissionReport
 from db_snooper.profiling.utility_dump import (
     dump_utility_available,
     dump_utility_name,

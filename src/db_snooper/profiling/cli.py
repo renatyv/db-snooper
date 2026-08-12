@@ -4,28 +4,24 @@ import argparse
 import logging
 import os
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 
+from db_snooper.application import run_profiles
 from db_snooper.connection import (
     add_connection_arguments,
-    list_schemas,
     resolve_database_url,
     resolve_schema,
 )
-from db_snooper.database_stats import LARGE_TABLE_THRESHOLD
-from db_snooper.permissions import PermissionReport, check_permissions
-from db_snooper.profiling.core import list_schema_tables, profile_database
-from db_snooper.profiling.models import ProfileOptions
-from db_snooper.profiling.suggestions import format_suggestions, profile_suggestions
+from db_snooper.contracts import ProfileOptions
+from db_snooper.profiling.suggestions import format_suggestions
 from db_snooper.progress import ProgressBar
-from db_snooper.query_timeout import DEFAULT_QUERY_TIMEOUT
 from db_snooper.shared import default_output_path, output_component, parse_table_set
 
 _logger = logging.getLogger("db_snooper")
+_DEFAULTS = ProfileOptions()
 
 
 def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
@@ -37,39 +33,39 @@ def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument(
         "--small-table-threshold",
         type=int,
-        default=10,
+        default=_DEFAULTS.small_table_threshold,
         help="Tables with this many rows or fewer are dumped in full.",
     )
     parser.add_argument(
         "--latest-row-limit",
         type=int,
-        default=1,
+        default=_DEFAULTS.latest_row_limit,
         help="Most-recent rows (by key) shown for tables above the small-table threshold.",
     )
     parser.add_argument(
         "--random-row-limit",
         type=int,
-        default=2,
+        default=_DEFAULTS.random_row_limit,
         help="Random rows shown for tables above the small-table threshold.",
     )
     parser.add_argument(
         "--large-table-threshold",
         type=int,
-        default=LARGE_TABLE_THRESHOLD,
+        default=_DEFAULTS.large_table_threshold,
         help=(
             "Tables whose catalog row estimate is at/above this count are profiled "
             "from internal stats only; COUNT(*) and per-column queries are skipped. "
-            f"Default {LARGE_TABLE_THRESHOLD}."
+            f"Default {_DEFAULTS.large_table_threshold}."
         ),
     )
     parser.add_argument(
         "--query-timeout",
         type=int,
-        default=DEFAULT_QUERY_TIMEOUT,
+        default=_DEFAULTS.query_timeout,
         help=(
             "Abort any profiling query that runs longer than this many seconds, skip the "
             "affected metric, and continue. 0 disables. Applies to PostgreSQL/MySQL/MariaDB "
-            f"(SQLite/DuckDB have no native support). Default {DEFAULT_QUERY_TIMEOUT}."
+            f"(SQLite/DuckDB have no native support). Default {_DEFAULTS.query_timeout}."
         ),
     )
     parser.add_argument(
@@ -131,12 +127,9 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     )
     engine = create_engine(url)
     progress_bar = ProgressBar("Profiling", 0)
-    active_schema = ""
-    permission_reports: list[PermissionReport] = []
 
-    def show_progress(current: int, total: int, table_name: str) -> None:
+    def show_progress(current: int, total: int, item: str) -> None:
         nonlocal progress_bar
-        item = f"{active_schema}: {table_name}"
         if progress_bar.total != total:
             progress_bar = ProgressBar("Profiling", total)
             progress_bar.start(f"profiling {item}")
@@ -152,57 +145,20 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         else default_output_path(args.database or os.environ["DB_SNOOPER_DATABASE"])
     )
     try:
-        schemas = list_schemas(engine, options.schema)
-        for schema in schemas:
-            active_schema = schema
-            schema_options = replace(options, schema=schema)
-            tables, skipped_technical, kinds = list_schema_tables(engine, schema_options)
-            if skipped_technical:
-                _logger.warning(
-                    "Skipped technical tables in %s: %s",
-                    schema,
-                    ", ".join(sorted(skipped_technical)),
-                )
-            schema_dir = output_dir / output_component(schema)
-            with engine.connect() as conn:
-                perm_report = check_permissions(
-                    conn,
-                    engine.dialect.name,
-                    schema_options.schema,
-                    tables,
-                )
-            permission_reports.append(perm_report)
-            if args.per_table:
+        run = run_profiles(engine, options, args.per_table, show_progress)
+        for warning in run.warnings:
+            _logger.warning(warning)
+        for document in run.documents:
+            if document.table is not None:
+                schema_dir = output_dir / output_component(document.schema)
                 schema_dir.mkdir(parents=True, exist_ok=True)
-                accessible_tables = set(perm_report.accessible_tables)
-                for table_name in tables:
-                    if table_name not in accessible_tables:
-                        continue
-                    table_output = profile_database(
-                        engine,
-                        schema_options,
-                        progress=show_progress,
-                        table_names=[table_name],
-                        permission_report=perm_report,
-                        kinds=kinds,
-                    )
-                    if table_output.strip():
-                        (schema_dir / f"{output_component(table_name)}.md").write_text(
-                            table_output, encoding="utf-8"
-                        )
-            else:
-                output = profile_database(
-                    engine,
-                    schema_options,
-                    progress=show_progress,
-                    table_names=tables,
-                    skipped_technical_tables=skipped_technical,
-                    permission_report=perm_report,
-                    kinds=kinds,
+                (schema_dir / f"{output_component(document.table)}.md").write_text(
+                    document.markdown, encoding="utf-8"
                 )
+            else:
                 output_dir.mkdir(parents=True, exist_ok=True)
-                (output_dir / f"{output_component(schema)}.md").write_text(
-                    output, encoding="utf-8"
+                (output_dir / f"{output_component(document.schema)}.md").write_text(
+                    document.markdown, encoding="utf-8"
                 )
     except SQLAlchemyError as exc:
         progress_bar.finish()
@@ -214,11 +170,11 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         raise
     else:
         progress_bar.finish("Profiling complete")
-        suggestions = format_suggestions(
-            profile_suggestions(permission_reports, engine.dialect.name)
-        )
+        suggestions = format_suggestions(run.suggestions)
         if suggestions:
             print(suggestions, file=sys.stderr)
+    finally:
+        engine.dispose()
     return 0
 
 

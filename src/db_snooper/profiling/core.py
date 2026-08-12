@@ -1,123 +1,40 @@
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timezone
-from typing import Any
 
 from sqlalchemy import MetaData, Table, inspect
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import SQLAlchemyError
 
-from db_snooper import __version__, query_timeout
-from db_snooper.permissions import PermissionReport, check_permissions, format_warnings
-from db_snooper.profiling.models import ProfileOptions, ProfileProgress
+from db_snooper import query_timeout
+from db_snooper._version import __version__
+from db_snooper.contracts import (
+    OBJECT_TABLE,
+    ProfileProgress,
+    SchemaProfilePlan,
+)
+from db_snooper.profiling.ddl import TableDdl, get_table_ddl
 from db_snooper.profiling.tables import (
     COLUMNS_HEADING,
     INDEXES_HEADING,
-    OBJECT_MATERIALIZED_VIEW,
-    OBJECT_TABLE,
-    OBJECT_VIEW,
-    TableDdl,
     TableProfile,
     collect_relationships,
     format_relationships,
-    get_table_ddl,
     profile_table,
     resolve_table_size,
 )
 from db_snooper.profiling.utility_dump import dump_create_table
-from db_snooper.shared import is_technical_table
-
-_logger = logging.getLogger("db_snooper")
 
 
-def list_schema_tables(
-    engine: Engine, options: ProfileOptions
-) -> tuple[list[str], list[str], dict[str, str]]:
-    """Return ``(objects, skipped_technical, kinds)`` for the schema.
-
-    ``objects`` includes base tables, views, and materialized views (sorted).
-    ``kinds`` maps each name to a kind constant from
-    :mod:`db_snooper.profiling.tables` (``OBJECT_TABLE`` / ``OBJECT_VIEW`` /
-    ``OBJECT_MATERIALIZED_VIEW``) so DDL generation emits the right statement.
-
-    Migration/DB-internal tables are excluded by default unless
-    ``options.include_technical_tables`` is set; the excluded names are returned
-    so the profile can record which tables were skipped.
-    """
-    inspector = inspect(engine)
-    base_tables = sorted(inspector.get_table_names(schema=options.schema))
-    kinds: dict[str, str] = {name: OBJECT_TABLE for name in base_tables}
-    # A name cannot be both a table and a view in one schema; ``setdefault``
-    # keeps tables authoritative in the unlikely event of a collision.
-    for name, kind in _list_views(
-        inspector, engine.dialect.name, options.schema
-    ).items():
-        kinds.setdefault(name, kind)
-
-    all_objects = sorted(kinds)
-    if not options.include_technical_tables:
-        skipped_technical = [t for t in all_objects if is_technical_table(t)]
-        objects = [t for t in all_objects if not is_technical_table(t)]
-    else:
-        skipped_technical = []
-        objects = list(all_objects)
-    if options.include_tables is not None:
-        objects = [obj for obj in objects if obj in options.include_tables]
-    objects = [obj for obj in objects if obj not in options.exclude_tables]
-    return objects, skipped_technical, kinds
-
-
-def _list_views(
-    inspector: Any, dialect: str, schema: str | None
-) -> dict[str, str]:
-    """Return ``{name: kind}`` for views and materialized views in a schema.
-
-    Materialized views are PostgreSQL-specific; other dialects return only
-    normal views. Any inspection error collapses to an empty dict so base-table
-    profiling is never affected.
-    """
-    kinds: dict[str, str] = {}
-    try:
-        for name in inspector.get_view_names(schema=schema):
-            kinds[name] = OBJECT_VIEW
-    except (SQLAlchemyError, NotImplementedError):
-        # Dialects without view support raise NotImplementedError; missing
-        # catalog access raises SQLAlchemyError. Either way, degrade to no views.
-        pass
-    if dialect == "postgresql":
-        for name in _postgres_materialized_view_names(inspector, schema):
-            kinds[name] = OBJECT_MATERIALIZED_VIEW
-    return kinds
-
-
-def _postgres_materialized_view_names(
-    inspector: Any, schema: str | None
-) -> list[str]:
-    """Materialized view names for PostgreSQL, or ``[]`` if unsupported.
-
-    ``Inspector.get_materialized_view_names`` exists on SQLAlchemy 2.0+ for the
-    PostgreSQL dialect; older versions (or dialects without it) return ``[]``.
-    """
-    method = getattr(inspector, "get_materialized_view_names", None)
-    if method is None:
-        return []
-    try:
-        return list(method(schema=schema))
-    except (SQLAlchemyError, NotImplementedError):
-        return []
-
-
-def profile_database(
+def profile_schema(
     engine: Engine,
-    options: ProfileOptions,
+    plan: SchemaProfilePlan,
     progress: ProfileProgress | None = None,
-    table_names: list[str] | None = None,
-    skipped_technical_tables: list[str] | None = None,
-    permission_report: PermissionReport | None = None,
-    kinds: dict[str, str] | None = None,
 ) -> str:
-    tables = table_names if table_names is not None else []
+    options = plan.options
+    tables = list(plan.table_names)
+    skipped_technical_tables = plan.skipped_technical_tables
+    permission_report = plan.permission_report
+    kinds = plan.kinds
     database = engine.url.database or ""
     generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     schema_value = options.schema or engine.dialect.default_schema_name or ""
@@ -130,13 +47,6 @@ def profile_database(
         f"database: {database}",
         f"schema: {schema_value}",
     ]
-    if table_names is None:
-        tables, computed_skipped, computed_kinds = list_schema_tables(engine, options)
-        if skipped_technical_tables is None:
-            skipped_technical_tables = computed_skipped
-        kinds = computed_kinds
-    if kinds is None:
-        kinds = {}
     if skipped_technical_tables:
         lines.append("skipped_technical_tables:")
         for name in sorted(skipped_technical_tables):
@@ -146,16 +56,9 @@ def profile_database(
 
     with engine.connect() as conn:
         query_timeout.apply_query_timeout(conn, options.query_timeout)
-        if permission_report is None:
-            permission_report = check_permissions(
-                conn, engine.dialect.name, options.schema, tables
-            )
-            for warning in format_warnings(permission_report):
-                _logger.warning(warning)
         accessible = set(permission_report.accessible_tables)
         tables = [table for table in tables if table in accessible]
         if not tables:
-            _logger.warning("No accessible tables to profile; skipping schema.")
             return "\n".join(lines).rstrip() + "\n"
         # Collect foreign-key relationships once (catalog metadata only, no row
         # scans) and emit a consolidated section up front. This survives the
@@ -172,7 +75,6 @@ def profile_database(
             lines.append("")
         metadata = MetaData()
         failed_ddl_tables: list[str] = []
-        failed_profile_tables: list[str] = []
         skipped_empty_tables: list[str] = []
         for index, table_name in enumerate(tables, start=1):
             if progress is not None:
@@ -227,12 +129,6 @@ def profile_database(
                         ddl_exc = exc
 
                 if ddl is None:
-                    reason = (
-                        "forced (--use-dump-ddl)"
-                        if options.use_dump_ddl
-                        else f"SQLAlchemy DDL failed ({type((ddl_exc or reflect_exc)).__name__})"
-                    )
-                    _logger.info("Utility fallback for '%s': %s", table_name, reason)
                     fallback_schema = (
                         table.schema if table is not None else None
                     ) or options.schema
@@ -241,9 +137,7 @@ def profile_database(
                             engine.url, engine.dialect.name, table_name, fallback_schema
                         )
                     except Exception as exc:
-                        _logger.warning(
-                            "utility fallback errored for '%s': %r", table_name, exc
-                        )
+                        ddl_exc = ddl_exc or exc
                         ddl = None
                     if ddl is not None:
                         lines.append(
@@ -252,12 +146,6 @@ def profile_database(
 
                 if ddl is None:
                     exc = ddl_exc or reflect_exc
-                    _logger.warning(
-                        "Skipped table '%s': could not generate DDL (%s: %s)",
-                        table_name,
-                        type(exc).__name__,
-                        exc,
-                    )
                     failed_ddl_tables.append(table_name)
                     lines.append(
                         f"- {table_name}: skipped (DDL generation failed: "
@@ -294,23 +182,13 @@ def profile_database(
                             index - 1, len(tables), f"{table_name} ({column_name})"
                         )
 
-                table_profile: TableProfile | None = None
-                try:
-                    table_profile = profile_table(
-                        conn,
-                        table,
-                        options,
-                        report_column=report_column,
-                        size_info=size_info,
-                    )
-                except Exception as exc:
-                    _logger.warning(
-                        "Skipped table '%s': could not generate profile (%s: %s)",
-                        table_name,
-                        type(exc).__name__,
-                        exc,
-                    )
-                    failed_profile_tables.append(table_name)
+                table_profile: TableProfile | None = profile_table(
+                    conn,
+                    table,
+                    options,
+                    report_column=report_column,
+                    size_info=size_info,
+                )
 
                 if table_profile is not None:
                     if table_profile.rows_heading:
@@ -333,16 +211,6 @@ def profile_database(
             f"Skipped {len(failed_ddl_tables)} table(s) due to DDL generation "
             f"errors: {', '.join(failed_ddl_tables)}"
         )
-        _logger.warning(summary)
-        lines.append(f"- {summary}")
-        lines.append("")
-
-    if failed_profile_tables:
-        summary = (
-            f"Skipped {len(failed_profile_tables)} table(s) due to Profile generation "
-            f"errors: {', '.join(failed_profile_tables)}"
-        )
-        _logger.warning(summary)
         lines.append(f"- {summary}")
         lines.append("")
 
@@ -350,7 +218,6 @@ def profile_database(
         summary = f"Skipped {len(skipped_empty_tables)} empty table(s): " + ", ".join(
             sorted(skipped_empty_tables)
         )
-        _logger.info(summary)
         lines.append(f"- {summary}")
         lines.append("")
 

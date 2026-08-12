@@ -1,0 +1,97 @@
+from __future__ import annotations
+
+from dataclasses import replace
+
+from sqlalchemy.engine import Engine
+
+from db_snooper.connection import list_schemas
+from db_snooper.contracts import (
+    ProfileDocument,
+    ProfileOptions,
+    ProfileProgress,
+    ProfileRun,
+    SchemaProfilePlan,
+)
+from db_snooper.permissions import check_permissions
+from db_snooper.profiling.core import profile_schema
+from db_snooper.profiling.discovery import list_schema_tables
+from db_snooper.profiling.suggestions import profile_suggestions
+
+
+def build_schema_plan(engine: Engine, options: ProfileOptions) -> SchemaProfilePlan:
+    tables, skipped_technical, kinds = list_schema_tables(engine, options)
+    with engine.connect() as conn:
+        permissions = check_permissions(
+            conn, engine.dialect.name, options.schema, tables
+        )
+    return SchemaProfilePlan(
+        options=options,
+        table_names=tuple(tables),
+        skipped_technical_tables=tuple(skipped_technical),
+        permission_report=permissions,
+        kinds=kinds,
+    )
+
+
+def profile_database(
+    engine: Engine,
+    options: ProfileOptions,
+    progress: ProfileProgress | None = None,
+) -> str:
+    return profile_schema(engine, build_schema_plan(engine, options), progress)
+
+
+def run_profiles(
+    engine: Engine,
+    options: ProfileOptions,
+    per_table: bool,
+    progress: ProfileProgress | None = None,
+) -> ProfileRun:
+    documents: list[ProfileDocument] = []
+    warnings: list[str] = []
+    reports = []
+    for schema in list_schemas(engine, options.schema):
+        schema_options = replace(options, schema=schema)
+        plan = build_schema_plan(engine, schema_options)
+        reports.append(plan.permission_report)
+        if plan.skipped_technical_tables:
+            warnings.append(
+                f"Skipped technical tables in {schema}: "
+                + ", ".join(sorted(plan.skipped_technical_tables))
+            )
+
+        def schema_progress(current: int, total: int, item: str) -> None:
+            if progress is not None:
+                progress(current, total, f"{schema}: {item}")
+
+        accessible = set(plan.permission_report.accessible_tables)
+        if per_table:
+            for table_name in plan.table_names:
+                if table_name not in accessible:
+                    continue
+                table_plan = replace(
+                    plan,
+                    table_names=(table_name,),
+                    skipped_technical_tables=(),
+                )
+                documents.append(
+                    ProfileDocument(
+                        schema=schema,
+                        table=table_name,
+                        markdown=profile_schema(engine, table_plan, schema_progress),
+                    )
+                )
+        else:
+            documents.append(
+                ProfileDocument(
+                    schema=schema,
+                    table=None,
+                    markdown=profile_schema(engine, plan, schema_progress),
+                )
+            )
+
+    return ProfileRun(
+        documents=tuple(documents),
+        warnings=tuple(warnings),
+        suggestions=tuple(profile_suggestions(reports, engine.dialect.name)),
+    )

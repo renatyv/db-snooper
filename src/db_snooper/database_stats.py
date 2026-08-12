@@ -10,10 +10,12 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.schema import UniqueConstraint
 
+from db_snooper.contracts import DEFAULT_LARGE_TABLE_THRESHOLD
+
 # Tables whose catalog row estimate is at/above this count are profiled from
 # internal database stats only: COUNT(*) and all per-column aggregations are
 # skipped because they would be far too slow. "Hundreds of millions or more".
-LARGE_TABLE_THRESHOLD = 100_000_000
+LARGE_TABLE_THRESHOLD = DEFAULT_LARGE_TABLE_THRESHOLD
 
 
 def estimate_row_count(conn: Connection, table: Table) -> int | None:

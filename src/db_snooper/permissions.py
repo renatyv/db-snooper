@@ -1,26 +1,10 @@
 from __future__ import annotations
 
-import logging
-from dataclasses import dataclass
-
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
 
-_logger = logging.getLogger("db_snooper")
-
-
-@dataclass(frozen=True)
-class PermissionReport:
-    dialect: str
-    schema: str | None
-    accessible_tables: list[str]
-    inaccessible_tables: list[tuple[str, str]]
-    stats_access: dict[str, bool]
-
-    @property
-    def has_select_access(self) -> bool:
-        return len(self.accessible_tables) > 0
+from db_snooper.contracts import PermissionReport
 
 
 def check_permissions(
@@ -175,40 +159,3 @@ def _check_table_exists(conn: Connection, table_name: str) -> bool:
         return row is not None
     except SQLAlchemyError:
         return False
-
-
-def format_warnings(report: PermissionReport) -> list[str]:
-    """Return human-readable warning strings for missing privileges."""
-    warnings: list[str] = []
-
-    if report.inaccessible_tables:
-        names = ", ".join(name for name, _ in report.inaccessible_tables)
-        count = len(report.inaccessible_tables)
-        warnings.append(f"SELECT denied on {count} table(s): {names}.")
-        hint = _grant_hint(report.dialect, report.schema)
-        if hint:
-            warnings.append(f"  Fix: {hint}")
-        if report.accessible_tables:
-            warnings.append(
-                f"  Skipping {count} table(s); continuing with {len(report.accessible_tables)}."
-            )
-
-    missing = {key: ok for key, ok in report.stats_access.items() if not ok}
-    if missing:
-        names = ", ".join(sorted(missing))
-        warnings.append(f"Catalog stats unreadable: {names}.")
-        warnings.append(
-            "  Catalog-derived estimates (null fraction, distinct, ranges, top "
-            "values) will be unavailable for large tables."
-        )
-
-    return warnings
-
-
-def _grant_hint(dialect: str, schema: str | None) -> str:
-    schema_name = schema or "<schema>"
-    if dialect == "postgresql":
-        return f"GRANT SELECT ON ALL TABLES IN SCHEMA {schema_name} TO <role>;"
-    if dialect in {"mysql", "mariadb"}:
-        return f"GRANT SELECT ON `{schema_name}`.* TO '<user>'@'<host>';"
-    return ""

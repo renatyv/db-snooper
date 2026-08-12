@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import Table, desc, func, select, text
+from sqlalchemy import Table, desc, func, select
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.schema import CreateIndex, CreateTable
 
 from db_snooper import query_timeout
+from db_snooper.contracts import ProfileOptions
 from db_snooper.database_stats import (
     estimate_row_count,
     get_catalog_column_stats,
@@ -27,14 +26,7 @@ from db_snooper.profiling.columns import (
     jsonable,
     profile_column,
 )
-from db_snooper.profiling.models import ProfileOptions
 from db_snooper.shared import is_sensitive
-
-# Kind of a schema object, used to choose the right DDL emitter. These are
-# imported by profiling.core (importing core here would be circular).
-OBJECT_TABLE = "table"
-OBJECT_VIEW = "view"
-OBJECT_MATERIALIZED_VIEW = "materialized_view"
 
 # Section headings emitted inside each table profile. The table name is the
 # top-level heading, so these nest one level below it.
@@ -58,23 +50,6 @@ class TableProfile:
     rows_heading: str | None
     rows_lines: list[str]
     columns_lines: list[str]
-
-
-@dataclass
-class TableDdl:
-    """CREATE TABLE DDL split from a table's index definitions.
-
-    ``create_table`` holds the full CREATE TABLE statement (and any DDL that is
-    not a standalone index). ``indexes`` holds *compact* index descriptors:
-    the verbose ``CREATE [UNIQUE] INDEX <name> ON <table>`` prefix is stripped
-    because an LLM building queries already knows the table (it is the section
-    heading) and rarely needs the index name. The column list and any clauses
-    (USING, WHERE, operator classes, ...) are kept, since those are what make
-    an index relevant to query construction.
-    """
-
-    create_table: list[str]
-    indexes: list[str]
 
 
 @dataclass(frozen=True)
@@ -156,7 +131,9 @@ def format_relationships(
         rels.sort(key=lambda r: (r.constrained_table, r.constrained_columns))
         children: list[str] = []
         for rel in rels:
-            child = _format_relationship_side(rel.constrained_table, rel.constrained_columns)
+            child = _format_relationship_side(
+                rel.constrained_table, rel.constrained_columns
+            )
             if child not in children:
                 children.append(child)
         lines.append(f"- {parent} ← {', '.join(children)}")
@@ -176,235 +153,6 @@ def _parent_display(rel: Relationship, schema: str | None) -> str:
     if rel.referred_schema and rel.referred_schema != schema:
         parent_table = f"{rel.referred_schema}.{rel.referred_table}"
     return _format_relationship_side(parent_table, rel.referred_columns)
-
-
-# Matches the ``CREATE [UNIQUE] INDEX <name> ON [<schema>.]<table>`` prefix of
-# an index DDL statement, capturing whether it was UNIQUE. Quoted ("...", `...`,
-# [...]) or bare identifiers are accepted for both the index and table names.
-_INDEX_PREFIX_RE = re.compile(
-    r"^\s*CREATE\s+"
-    r"(?P<unique>UNIQUE\s+)?"
-    r"INDEX\s+"
-    r"(?:\"[^\"]+\"|`[^`]+`|\[[^\]]+\]|\S+)\s+"
-    r"ON\s+"
-    r"(?:\"[^\"]+\"|`[^`]+`|\[[^\]]+\]|[\w.]+)\s*",
-    re.IGNORECASE,
-)
-
-
-def compact_index_sql(sql: str) -> str:
-    """Strip the ``CREATE [UNIQUE] INDEX <name> ON <table>`` prefix from DDL.
-
-    ``(ival)`` and ``UNIQUE (fval)`` survive; ``USING gin (col)``, ``WHERE``
-    predicates and operator classes are preserved. If the prefix can't be
-    matched the input is returned unchanged (only trimmed of a trailing
-    semicolon) so nothing is lost.
-    """
-    match = _INDEX_PREFIX_RE.match(sql)
-    if match is None:
-        return sql.strip().rstrip(";").strip()
-    unique = (match.group("unique") or "").strip()
-    rest = sql[match.end():].strip().rstrip(";").strip()
-    return f"{unique} {rest}".strip() if unique else rest
-
-
-def get_table_ddl(
-    conn: Connection, table: Table, kind: str = OBJECT_TABLE
-) -> TableDdl:
-    if kind in {OBJECT_VIEW, OBJECT_MATERIALIZED_VIEW}:
-        return get_view_ddl(conn, table, kind)
-    dialect_name = conn.dialect.name
-    if dialect_name == "sqlite":
-        return get_sqlite_ddl(conn, table.name)
-    if dialect_name in {"mysql", "mariadb"}:
-        return get_mysql_ddl(conn, table)
-    return get_reflected_ddl(conn, table)
-
-
-def get_view_ddl(conn: Connection, table: Table, kind: str) -> TableDdl:
-    """Return DDL for a view or materialized view.
-
-    A view cannot be reconstructed from its reflected columns, so each dialect
-    reads the stored definition (``pg_get_viewdef``, ``sqlite_master``,
-    ``information_schema.views``, ``duckdb_views()``). Materialized views also
-    expose their indexes, reflected from the catalog.
-    """
-    dialect_name = conn.dialect.name
-    if dialect_name == "postgresql":
-        return _postgres_view_ddl(conn, table, kind)
-    if dialect_name == "sqlite":
-        return _sqlite_view_ddl(conn, table.name)
-    if dialect_name == "duckdb":
-        return _duckdb_view_ddl(conn, table)
-    if dialect_name in {"mysql", "mariadb"}:
-        return _mysql_view_ddl(conn, table)
-    # Unrecognized dialect: fall back to reflected columns so the object still
-    # surfaces with its column shape rather than disappearing from the profile.
-    return get_reflected_ddl(conn, table)
-
-
-def _view_keyword(kind: str) -> str:
-    return (
-        "CREATE MATERIALIZED VIEW"
-        if kind == OBJECT_MATERIALIZED_VIEW
-        else "CREATE VIEW"
-    )
-
-
-def _materialized_view_indexes(conn: Connection, table: Table) -> list[str]:
-    indexes: list[str] = []
-    for index in sorted(table.indexes, key=lambda idx: idx.name or ""):
-        full = ensure_semicolon(str(CreateIndex(index).compile(conn)))
-        indexes.append(compact_index_sql(full))
-    return indexes
-
-
-def _postgres_view_ddl(conn: Connection, table: Table, kind: str) -> TableDdl:
-    # pg_get_viewdef takes the relation OID and returns just the SELECT body;
-    # joining pg_class avoids the ``::regclass`` cast that collides with
-    # SQLAlchemy's ``:param`` bind syntax. Works for both views ('v') and
-    # materialized views ('m').
-    body = conn.execute(
-        text(
-            "SELECT pg_get_viewdef(c.oid, true) FROM pg_class c "
-            "JOIN pg_namespace n ON n.oid = c.relnamespace "
-            "WHERE n.nspname = :schema AND c.relname = :name"
-        ),
-        {"schema": table.schema, "name": table.name},
-    ).scalar_one_or_none()
-    qualified = conn.dialect.identifier_preparer.format_table(table)
-    keyword = _view_keyword(kind)
-    create_table: list[str] = []
-    if body:
-        create_table.append(
-            ensure_semicolon(f"{keyword} {qualified} AS\n{body.strip().rstrip(';')}")
-        )
-    else:
-        create_table.append(ensure_semicolon(f"{keyword} {qualified} AS SELECT *"))
-    indexes = (
-        _materialized_view_indexes(conn, table)
-        if kind == OBJECT_MATERIALIZED_VIEW
-        else []
-    )
-    return TableDdl(create_table=create_table, indexes=indexes)
-
-
-def _sqlite_view_ddl(conn: Connection, table_name: str) -> TableDdl:
-    # sqlite_master stores the full ``CREATE VIEW ... AS SELECT ...`` text.
-    sql = conn.execute(
-        text("SELECT sql FROM sqlite_master WHERE type = 'view' AND name = :name"),
-        {"name": table_name},
-    ).scalar_one_or_none()
-    create_table = [ensure_semicolon(str(sql))] if sql else []
-    return TableDdl(create_table=create_table, indexes=[])
-
-
-def _duckdb_view_ddl(conn: Connection, table: Table) -> TableDdl:
-    schema = table.schema or "main"
-    sql = conn.execute(
-        text(
-            "SELECT sql FROM duckdb_views() "
-            "WHERE schema_name = :schema AND view_name = :name"
-        ),
-        {"schema": schema, "name": table.name},
-    ).scalar_one_or_none()
-    create_table = [ensure_semicolon(str(sql))] if sql else []
-    return TableDdl(create_table=create_table, indexes=[])
-
-
-def _mysql_view_ddl(conn: Connection, table: Table) -> TableDdl:
-    schema = table.schema or conn.dialect.default_schema_name
-    body = conn.execute(
-        text(
-            "SELECT view_definition FROM information_schema.views "
-            "WHERE table_schema = :schema AND table_name = :name"
-        ),
-        {"schema": schema, "name": table.name},
-    ).scalar_one_or_none()
-    qualified = conn.dialect.identifier_preparer.format_table(table)
-    create_table: list[str] = []
-    if body is not None:
-        create_table.append(
-            ensure_semicolon(f"CREATE VIEW {qualified} AS {body.strip().rstrip(';')}")
-        )
-    return TableDdl(create_table=create_table, indexes=[])
-
-
-def get_sqlite_ddl(conn: Connection, table_name: str) -> TableDdl:
-    table_sql = conn.execute(
-        text("select sql from sqlite_master where type = 'table' and name = :name"),
-        {"name": table_name},
-    ).scalar_one_or_none()
-    index_sql = conn.execute(
-        text(
-            "select sql from sqlite_master "
-            "where type = 'index' and tbl_name = :name and sql is not null "
-            "order by name"
-        ),
-        {"name": table_name},
-    ).scalars()
-
-    create_table: list[str] = []
-    if table_sql:
-        create_table.append(ensure_semicolon(str(table_sql)))
-    indexes = [compact_index_sql(ensure_semicolon(str(sql))) for sql in index_sql]
-    return TableDdl(create_table=create_table, indexes=indexes)
-
-
-# Matches a secondary/unique/fulltext/spatial index definition and captures its
-# leading keyword (e.g. ``UNIQUE ``) so the generated index name can be dropped
-# while keeping the indexed column list. ``PRIMARY KEY`` and ``CONSTRAINT ...
-# FOREIGN KEY`` are not matched: no name sits between their ``KEY`` and ``(``.
-_MYSQL_INDEX_NAME_RE = re.compile(
-    r"\b((?:UNIQUE|FULLTEXT|SPATIAL)\s+)?KEY\s+(?:`[^`]+`|\w+)(?=\s*\()",
-    re.IGNORECASE,
-)
-
-
-def _strip_mysql_noise(sql: str) -> str:
-    """Normalize a MySQL ``SHOW CREATE TABLE`` statement for compact LLM context.
-
-    Strips engine-specific noise: the no-op ``DEFAULT NULL`` column default,
-    column/table ``CHARACTER SET``/``CHARSET`` and ``COLLATE``/``COLLATION``
-    clauses, the ``ENGINE=`` table option, and the generated names on secondary
-    and unique indexes (``KEY name (cols)`` -> ``KEY (cols)``). Primary keys,
-    foreign keys (with their constraint names), ``UNIQUE`` constraints, and the
-    indexed column lists are all preserved.
-    """
-    sql = re.sub(r"\s+DEFAULT\s+NULL\b", "", sql, flags=re.IGNORECASE)
-    sql = re.sub(r"\s+CHARACTER\s+SET\s+\w+", "", sql, flags=re.IGNORECASE)
-    sql = re.sub(r"\s+COLLATE\s+\w+", "", sql, flags=re.IGNORECASE)
-    sql = re.sub(r"\s*ENGINE\s*=\s*\w+", "", sql, flags=re.IGNORECASE)
-    sql = re.sub(
-        r"\s*(?:DEFAULT\s+)?CHARSET\s*=\s*\w+", "", sql, flags=re.IGNORECASE
-    )
-    sql = re.sub(
-        r"\s*(?:DEFAULT\s+)?COLL(?:ATE|ATION)\s*=\s*\w+", "", sql, flags=re.IGNORECASE
-    )
-    sql = _MYSQL_INDEX_NAME_RE.sub(r"\1KEY", sql)
-    return sql
-
-
-def get_mysql_ddl(conn: Connection, table: Table) -> TableDdl:
-    quoted_table = conn.dialect.identifier_preparer.format_table(table)
-    row = conn.exec_driver_sql(f"SHOW CREATE TABLE {quoted_table}").first()
-    if row is None:
-        return TableDdl(create_table=[], indexes=[])
-    # MySQL embeds secondary indexes (KEY/UNIQUE KEY) inside CREATE TABLE, so
-    # there are no separate index statements to extract. SHOW CREATE TABLE also
-    # pads the statement with engine-specific noise (DEFAULT NULL, ENGINE,
-    # CHARSET, COLLATE, generated index names); strip it for a compact profile.
-    create_table = _strip_mysql_noise(str(row[1]))
-    return TableDdl(create_table=[ensure_semicolon(create_table)], indexes=[])
-
-
-def get_reflected_ddl(conn: Connection, table: Table) -> TableDdl:
-    create_table = [ensure_semicolon(str(CreateTable(table).compile(conn)))]
-    indexes: list[str] = []
-    for index in sorted(table.indexes, key=lambda idx: idx.name or ""):
-        full = ensure_semicolon(str(CreateIndex(index).compile(conn)))
-        indexes.append(compact_index_sql(full))
-    return TableDdl(create_table=create_table, indexes=indexes)
 
 
 @dataclass
@@ -450,7 +198,7 @@ def resolve_table_size(
         )
     try:
         total_rows = query_timeout.execute(
-            conn, select(func.count()).select_from(table)
+            conn, select(func.count()).select_from(table), options.query_timeout
         ).scalar_one()
     except query_timeout.QueryTimeout:
         return TableSizeInfo(
@@ -491,9 +239,7 @@ def _catalog_column_lines(column: Any, stat: Any, estimate: int) -> list[str]:
     if stat.distinct is not None:
         parts.append(f"distinct≈{stat.distinct}")
     has_numeric = (
-        is_numeric(column)
-        and stat.min_value is not None
-        and stat.max_value is not None
+        is_numeric(column) and stat.min_value is not None and stat.max_value is not None
     )
     # Top values can expose real column values, so suppress them for sensitive
     # columns (mirrors the exact profiling path).
@@ -598,8 +344,10 @@ def profile_table(
 
     if total_rows <= options.small_table_threshold:
         sampled: list[dict[str, Any]] = []
-        with query_timeout.metric(conn, [], "sampled rows"):
-            sampled = sample_rows(conn, table, options.small_table_threshold)
+        with query_timeout.metric([], "sampled rows"):
+            sampled = sample_rows(
+                conn, table, options.small_table_threshold, options.query_timeout
+            )
         labels = [f"row {index + 1}" for index in range(len(sampled))]
         rows_lines = _format_rows_table(column_names, sampled, labels)
         # Every row fits: we only reach here when total_rows <= threshold, and
@@ -623,11 +371,15 @@ def profile_table(
     # then per-column profiles.
     rows_lines = [f"- total={total_rows}"]
     latest: list[dict[str, Any]] = []
-    with query_timeout.metric(conn, [], "latest rows"):
-        latest = latest_rows(conn, table, options.latest_row_limit)
+    with query_timeout.metric([], "latest rows"):
+        latest = latest_rows(
+            conn, table, options.latest_row_limit, options.query_timeout
+        )
     random_sample: list[dict[str, Any]] = []
-    with query_timeout.metric(conn, [], "random rows"):
-        random_sample = random_rows(conn, table, options.random_row_limit)
+    with query_timeout.metric([], "random rows"):
+        random_sample = random_rows(
+            conn, table, options.random_row_limit, options.query_timeout
+        )
 
     combined = list(latest) + list(random_sample)
     labels = ["latest"] * len(latest) + ["sample"] * len(random_sample)
@@ -670,33 +422,39 @@ def profile_table(
     )
 
 
-def sample_rows(conn: Connection, table: Table, limit: int) -> list[dict[str, Any]]:
+def sample_rows(
+    conn: Connection, table: Table, limit: int, timeout_seconds: int = 0
+) -> list[dict[str, Any]]:
     order_columns = list(table.primary_key.columns) or list(table.columns)
     statement = select(table).order_by(*order_columns).limit(limit)
-    return rows_for_statement(conn, table, statement)
+    return rows_for_statement(conn, table, statement, timeout_seconds)
 
 
-def latest_rows(conn: Connection, table: Table, limit: int) -> list[dict[str, Any]]:
+def latest_rows(
+    conn: Connection, table: Table, limit: int, timeout_seconds: int = 0
+) -> list[dict[str, Any]]:
     order_columns = list(table.primary_key.columns) or list(table.columns)
     statement = (
         select(table).order_by(*(desc(column) for column in order_columns)).limit(limit)
     )
-    return rows_for_statement(conn, table, statement)
+    return rows_for_statement(conn, table, statement, timeout_seconds)
 
 
-def random_rows(conn: Connection, table: Table, limit: int) -> list[dict[str, Any]]:
+def random_rows(
+    conn: Connection, table: Table, limit: int, timeout_seconds: int = 0
+) -> list[dict[str, Any]]:
     random_function = (
         func.rand() if conn.dialect.name in {"mysql", "mariadb"} else func.random()
     )
     statement = select(table).order_by(random_function).limit(limit)
-    return rows_for_statement(conn, table, statement)
+    return rows_for_statement(conn, table, statement, timeout_seconds)
 
 
 def rows_for_statement(
-    conn: Connection, table: Table, statement: Any
+    conn: Connection, table: Table, statement: Any, timeout_seconds: int = 0
 ) -> list[dict[str, Any]]:
     rows = []
-    for row in query_timeout.execute(conn, statement).mappings():
+    for row in query_timeout.execute(conn, statement, timeout_seconds).mappings():
         output: dict[str, Any] = {}
         for column in table.columns:
             value = row[column.name]
@@ -720,10 +478,3 @@ def bounded_value(value: Any) -> Any:
         if len(serialized) > JSON_MAX_VALUE_BYTES:
             return f"[LARGE_JSON:{len(serialized)}]"
     return encoded
-
-
-def ensure_semicolon(sql: str) -> str:
-    sql = sql.rstrip()
-    if not sql.endswith(";"):
-        return sql + ";"
-    return sql

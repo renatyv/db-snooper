@@ -1,14 +1,8 @@
-from importlib.metadata import PackageNotFoundError, version
-
-try:
-    __version__ = version("db-snooper")
-except PackageNotFoundError:
-    # Keep this fallback aligned with pyproject.toml for source-tree execution.
-    __version__ = "0.0.1"
-
+from db_snooper._version import __version__
 from db_snooper.api import generate_profile
-from db_snooper.permissions import PermissionReport, check_permissions
-from db_snooper.profiling import ProfileOptions, profile_database
+from db_snooper.application import profile_database
+from db_snooper.contracts import PermissionReport, ProfileOptions
+from db_snooper.permissions import check_permissions
 
 __all__ = [
     "PermissionReport",
