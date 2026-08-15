@@ -16,7 +16,7 @@ from db_snooper.contracts import (
 )
 from db_snooper.profiling.ddl import TableDdl, get_table_ddl
 from db_snooper.profiling.schema_header import (
-    format_columns_line,
+    format_column_tokens,
     format_fk_line,
     format_indexes_line,
 )
@@ -191,11 +191,12 @@ def _profile_one_table(
 ):
     """Profile a single table, returning (TableProfile, raw_ddl, fallback_note).
 
-    Introspection produces the flattened header lines by default. The full
-    ``CREATE TABLE`` DDL is only ever emitted as a last-resort fallback when
-    introspection fails entirely; in that case ``raw_ddl`` carries the DDL
-    block (rendered as fenced ``sql``) and the header lines in the
-    ``TableProfile`` are left ``None``.
+    Introspection produces the merged ``columns:`` tokens plus the
+    ``indexes:``/``fk:`` lines by default. The full ``CREATE TABLE`` DDL is
+    only ever emitted as a last-resort fallback when introspection fails
+    entirely; in that case ``raw_ddl`` carries the DDL block (rendered as
+    fenced ``sql``) and the header fields in the ``TableProfile`` are left
+    ``None``.
     """
     # ``raw_ddl`` is set in two cases: (1) a view/materialized view, whose
     # SELECT definition introspection cannot derive, so its CREATE VIEW DDL is
@@ -255,11 +256,12 @@ def _profile_one_table(
             size_info=size_info,
             allow_table_sample=kind == OBJECT_TABLE,
         )
-        # Flattened header lines come from introspection on the reflected base
-        # table. Views/materialized views render their CREATE VIEW DDL instead
-        # (via raw_ddl), so the introspection header is skipped for them.
+        # Column tokens come from introspection on the reflected table and are
+        # merged with the profiles into the ``columns:`` block at emit time.
+        # Views/materialized views also render their CREATE VIEW DDL (via
+        # raw_ddl) ahead of that block; their indexes/fk lines stay suppressed.
+        table_profile.column_tokens = format_column_tokens(table, conn)
         if raw_ddl is None:
-            table_profile.columns_line = format_columns_line(table, conn)
             table_profile.indexes_line = format_indexes_line(table, conn)
             table_profile.fk_line = format_fk_line(table)
     else:
@@ -286,13 +288,16 @@ def _emit_table_block(
 
     Layout (blank-line-separated):
         # <table>  (rows=<N>)
-        columns: ...
+        columns:
+        <col>(<type>[,flags]): <inline profile>
         indexes: ...
         fk: ...
-        values:
-        <col>: <inline>
         samples: / all rows:
         | column | ... |
+
+    Views render their CREATE VIEW DDL in a fenced ``sql`` block in place of
+    the ``indexes:``/``fk:`` lines; the utility-DDL fallback (reflection
+    failed) has no column tokens, so its block is DDL + note only.
     """
     row_display = table_profile.row_count_display
     if not row_display and size_info is not None:
@@ -311,33 +316,42 @@ def _emit_table_block(
         lines.append(fallback_note)
 
     if raw_ddl is not None:
-        # Last-resort: emit the raw CREATE TABLE in a fenced sql block in
-        # place of the three header lines, then continue with values/samples.
         lines.append("```sql")
         lines.extend(raw_ddl)
         lines.append("```")
         lines.append("")
-    else:
-        for line in (
-            table_profile.columns_line,
-            table_profile.indexes_line,
-            table_profile.fk_line,
-        ):
-            if line:
-                lines.append(line)
-        lines.append("")
 
-    # values: block — one line per column (suppressed for included empty
-    # tables, which carry no data context).
+    # columns: block — the merged schema + per-column profile. Each column is
+    # one ``name(type[,flags]): profile`` line. Included empty tables carry no
+    # data context, so they emit bare tokens with no profile text; columns the
+    # stats path skipped render as bare tokens too.
     is_empty_included = (
         size_info is not None
         and size_info.is_empty
         and options.include_empty_tables
     )
-    if table_profile.column_profiles and not is_empty_included:
-        lines.append("values:")
-        for profile in table_profile.column_profiles:
-            lines.append(f"{profile.name}: {profile.value_line}")
+    if table_profile.column_tokens:
+        profiles_by_name = (
+            {}
+            if is_empty_included
+            else {
+                profile.name: profile.value_line
+                for profile in table_profile.column_profiles
+            }
+        )
+        lines.append("columns:")
+        for name, token in table_profile.column_tokens:
+            value_line = profiles_by_name.get(name)
+            lines.append(f"{token}: {value_line}" if value_line else token)
+        lines.append("")
+
+    if raw_ddl is None:
+        for line in (
+            table_profile.indexes_line,
+            table_profile.fk_line,
+        ):
+            if line:
+                lines.append(line)
         lines.append("")
 
     # samples: / all rows: block.

@@ -7,12 +7,13 @@ from db_snooper.contracts import ProfileOptions, ProfileProgress
 
 @dataclass(frozen=True)
 class ColumnProfile:
-    """Inline profile for a single column, rendered as one ``values:`` line.
+    """Inline profile for a single column, rendered on its ``columns:`` line.
 
-    ``value_line`` is the full text placed after ``<name>: `` — distinct counts,
-    histograms, min/max, avg/median, nulls, and any ``← dropped from samples``
-    annotation all live on this single string. Continuation/indented child lines
-    are intentionally avoided: the spec requires one line per column.
+    ``value_line`` is the profile text placed after the ``name(type[,flags]):``
+    token — distinct counts, histograms, min/max, avg/median, nulls, and any
+    ``← dropped from samples`` annotation all live on this single string.
+    Continuation/indented child lines are intentionally avoided: the spec
+    requires one line per column.
     """
 
     name: str

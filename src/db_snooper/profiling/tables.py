@@ -33,14 +33,15 @@ from db_snooper.shared import is_sensitive
 class TableProfile:
     """Structured profile for a single table, rendered as one compact block.
 
-    The normal path fills ``columns_line``/``indexes_line``/``fk_line`` (the
-    flattened schema header). When introspection fully fails, ``raw_ddl`` holds
-    the last-resort CREATE TABLE block (rendered as a fenced ``sql`` block) and
-    the three header lines are ``None``. ``column_profiles`` drives the
-    ``values:`` block; ``sample_*`` fields drive ``samples:``/``all rows:``.
+    The normal path fills ``column_tokens`` (``(name, "name(type[,flags])")``
+    pairs merged with ``column_profiles`` into the ``columns:`` block) plus
+    ``indexes_line``/``fk_line``. When introspection fully fails, ``raw_ddl``
+    holds the last-resort CREATE TABLE block (rendered as a fenced ``sql``
+    block), the header fields are ``None``, and column profiling is skipped.
+    ``sample_*`` fields drive ``samples:``/``all rows:``.
     """
 
-    columns_line: str | None = None
+    column_tokens: list[tuple[str, str]] | None = None
     indexes_line: str | None = None
     fk_line: str | None = None
     raw_ddl: list[str] | None = None
@@ -397,7 +398,8 @@ def profile_table(
         column_profiles = _profile_all_columns(
             conn, table, options, int(total_rows), report_column
         )
-        # Small tables (<10 rows) emit both values: and all rows: per spec.
+        # Small tables (<10 rows) emit both the columns: profiles and all
+        # rows: per spec.
         sample_columns = select_sample_columns(column_profiles)
         return TableProfile(
             column_profiles=column_profiles,

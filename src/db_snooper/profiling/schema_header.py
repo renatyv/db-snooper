@@ -7,14 +7,19 @@ from sqlalchemy import Table
 from sqlalchemy.engine import Connection
 from sqlalchemy.schema import ForeignKeyConstraint, UniqueConstraint
 
-# The one-block-per-table format flattens a table's shape into three header
-# lines (``columns:``/``indexes:``/``fk:``) derived from SQLAlchemy
+# The one-block-per-table format flattens a table's shape into a merged
+# ``columns:`` block (one ``name(type[,flags]): profile`` line per column, see
+# core.py) plus the ``indexes:``/``fk:`` one-liners, all derived from SQLAlchemy
 # introspection. These helpers replace the historical ``CREATE TABLE`` DDL block
 # in the normal path; DDL survives only as a last-resort fallback (see core.py).
 
 
-def format_columns_line(table: Table, conn: Connection) -> str:
-    """Render every column as ``name(type[,flags])`` on a single ``columns:`` line.
+def format_column_tokens(table: Table, conn: Connection) -> list[tuple[str, str]]:
+    """Render every column as a ``name(type[,flags])`` token, in table order.
+
+    Returns ``(column_name, token)`` pairs so the caller can join each token
+    with the column's profile by name (the catalog-stats path may skip columns,
+    so a positional zip with the profile list is not safe).
 
     Flags, emitted only when they apply and in this order: ``PK`` (primary-key
     member), ``UNIQ`` (single-column UNIQUE), ``NOTNULL`` (NOT NULL, not already
@@ -24,7 +29,7 @@ def format_columns_line(table: Table, conn: Connection) -> str:
     pk_names = {column.name for column in table.primary_key.columns}
     single_uniques = _single_column_unique_names(table)
     single_fks = _single_column_fk_names(table)
-    tokens = []
+    tokens: list[tuple[str, str]] = []
     for column in table.columns:
         type_token = compact_type_string(column, conn.dialect)
         flags = []
@@ -37,8 +42,8 @@ def format_columns_line(table: Table, conn: Connection) -> str:
         if column.name in single_fks:
             flags.append("FK")
         suffix = f",{','.join(flags)}" if flags else ""
-        tokens.append(f"{column.name}({type_token}{suffix})")
-    return "columns: " + ", ".join(tokens)
+        tokens.append((column.name, f"{column.name}({type_token}{suffix})"))
+    return tokens
 
 
 def format_indexes_line(table: Table, conn: Connection) -> str:

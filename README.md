@@ -35,19 +35,18 @@ The profile `.md` file contains:
 - A top-level `Relationships` section listing every foreign key as `- parent.col ← child.col` bullets (composite keys as `table.(c1, c2)`), grouped so a parent referenced by many tables appears once as `- parent.col ← child1.col, child2.col`. Lines are sorted by parent.
 - One compact block per non-empty table, in this fixed layout:
   - A `# <table>  (rows=<N>)` header (the count uses the engine's row estimate — `≈N` — when available, otherwise an exact `COUNT(*)`).
-  - A flattened schema header — three one-liners derived from introspection:
-    - `columns:` — one token per column as `name(type[,flags])`. Flags (emitted only when they apply): `PK`, `UNIQ` (single-column unique), `NOTNULL`, `FK`. Example: `id(bigserial,PK), email(varchar255,UNIQ,NOTNULL), user_id(bigint,FK)`.
-    - `indexes:` — parenthesized column lists, multi-column indexes keep their order, partial indexes append `WHERE <predicate>`. The primary-key index is not repeated. `none` when there are no non-PK indexes.
-    - `fk:` — `col→ref_table.ref_col` (composite FKs as `(c1,c2)→ref_table.(r1,r2)`). `none` when there are none.
-  - A `values:` block with one inline line per column — distinct counts, full histograms for low-cardinality columns, null fractions, numeric ranges (`int`/`float`/`numeric min..max`), average/median, and top values all sit on that single line. High-cardinality free-text/JSON/blob columns are annotated `← dropped from samples`.
+  - A merged `columns:` block — one line per column as `name(type[,flags]): profile`, so each column's type, flags, and value distribution sit together and the name is printed once. Flags (emitted only when they apply): `PK`, `UNIQ` (single-column unique), `NOTNULL`, `FK`. Example: `id(bigserial,PK): unique identifier, 1..12592`, `tick(bigint): 4079 distinct, 1..12592, avg=1944.8`. Numeric ranges omit the `int`/`float`/`numeric` qualifier — the type token already carries it.
+  - `indexes:` — parenthesized column lists, multi-column indexes keep their order, partial indexes append `WHERE <predicate>`. The primary-key index is not repeated. `none` when there are no non-PK indexes.
+  - `fk:` — `col→ref_table.ref_col` (composite FKs as `(c1,c2)→ref_table.(r1,r2)`). `none` when there are none.
+  - Profiles carry distinct counts, full histograms for low-cardinality columns, null fractions, numeric ranges, average/median, and top values on the column's single line. High-cardinality free-text/JSON/blob columns are annotated `← dropped from samples`.
   - A `samples:` block — a transposed markdown table (one row per column, columns `latest | sample | sample`) showing 1 latest row and 2 random rows for the columns whose concrete values add information.
-- Tables with fewer than 10 rows emit `all rows:` (listing every row) in place of `samples:`, and still include a `values:` block when any column has a useful profile.
-- Views and materialized views emit their `CREATE VIEW` DDL (their SELECT definition) in place of the flattened header lines.
+- Tables with fewer than 10 rows emit `all rows:` (listing every row) in place of `samples:`, and still include the profile text on their `columns:` lines when any column has a useful profile.
+- Views and materialized views emit their `CREATE VIEW` DDL (their SELECT definition) in place of the `indexes:`/`fk:` lines, followed by the merged `columns:` block.
 - Catalog-derived estimates for very large tables (hundreds of millions of rows or more) from each engine's internal statistics — PostgreSQL `pg_stats`, MySQL `COLUMN_STATISTICS` histograms, and MariaDB `mysql.column_stats` — emitted with `≈` markers and a trailing `(from db stats)` tag so they are distinguishable from exact values.
-- Top-level key frequencies for JSON/JSONB columns and min/avg/max element counts for ARRAY columns (when row counts allow), rendered as trailing annotations on the column's `values:` line.
-- Redacted values for sensitive column names containing `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token` — the column appears in `values:` with `redacted` and is excluded from samples.
+- Top-level key frequencies for JSON/JSONB columns and min/avg/max element counts for ARRAY columns (when row counts allow), rendered as trailing annotations on the column's `columns:` line.
+- Redacted values for sensitive column names containing `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token` — the column's `columns:` line reads `redacted` and it is excluded from samples.
 - A `skipped_technical_tables` entry in the frontmatter naming migration/framework tables excluded from the profile.
-- Empty tables are skipped by default. A `- Skipped N empty table(s):` bullet names them; the Python API's `ProfileOptions(include_empty_tables=True)` includes them (emitting only the flattened `columns:` line, with no `values:`/`samples:`).
+- Empty tables are skipped by default. A `- Skipped N empty table(s):` bullet names them; the Python API's `ProfileOptions(include_empty_tables=True)` includes them (emitting only the bare per-column type tokens in the `columns:` block, with no profile text or `samples:`).
 
 ## Database Examples
 

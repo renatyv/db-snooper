@@ -39,7 +39,7 @@ def profile_column(
     timeout_seconds: int,
     catalog_stat: Any = None,
 ) -> ColumnProfile:
-    """Profile a single column and return its inline ``values:`` line.
+    """Profile a single column and return its inline ``columns:`` profile text.
 
     All metrics for the column — distinct count, full histogram, nulls, numeric
     range, average/median, top values, JSON/array summaries, skip reasons —
@@ -138,7 +138,8 @@ def profile_column(
                     conn, table, column, limit=None, timeout_seconds=timeout_seconds
                 )
 
-    # Numeric min/max is inlined (``int 5..214``); average/median and the
+    # Numeric min/max is inlined (``5..214`` — the type token on the merged
+    # columns: line already says int/float/numeric); average/median and the
     # catalog-range fallback join the same line.
     numeric_range: str | None = None
     numeric_stats: list[str] = []
@@ -153,7 +154,6 @@ def profile_column(
                 ).one()
             if min_value is not None and max_value is not None:
                 numeric_range = (
-                    f"{numeric_type_word(column)} "
                     f"{format_value(min_value)}..{format_value(max_value)}"
                 )
                 have_range = True
@@ -428,20 +428,6 @@ def get_unique_column_names(table: Table) -> set[str]:
 
 def is_numeric(column: Any) -> bool:
     return isinstance(column.type, (Integer, BigInteger, SmallInteger, Numeric, Float))
-
-
-def numeric_type_word(column: Any) -> str:
-    """Short type label for inline numeric ranges: ``int``/``float``/``numeric``.
-
-    Matches the spec's ``int 1..12592`` / ``float`` / ``numeric`` forms: integer
-    SQL types collapse to ``int``, floating-point types to ``float``, and exact
-    decimals (``NUMERIC``/``DECIMAL``) to ``numeric``.
-    """
-    if isinstance(column.type, (Integer, BigInteger, SmallInteger)):
-        return "int"
-    if isinstance(column.type, Float):
-        return "float"
-    return "numeric"
 
 
 def is_json(column: Any) -> bool:

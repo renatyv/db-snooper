@@ -8,11 +8,11 @@ For each database create a separate folder with subfolders for each of the schem
 
 Generate a single `db_/schema.md` profile per schema by default. When requested with `--per-table`, generate separate files `db_/schema/table.md`.
 
-The profile is written in a **compact one-block-per-table** format (see [Output format](#output-format)). Every table renders its schema, per-column value profiles, and row samples in a single contiguous block of roughly 15–30 lines regardless of column count. The historical `CREATE TABLE` DDL block, the separate `## Indexes` / `## Rows` / `## Columns` sections, and the transposed all-rows table are all superseded by this format.
+The profile is written in a **compact one-block-per-table** format (see [Output format](#output-format)). Every table renders its schema and per-column value profiles in one merged `columns:` block, plus row samples, in a single contiguous block of roughly 15–30 lines regardless of column count. The historical `CREATE TABLE` DDL block, the separate `## Indexes` / `## Rows` / `## Columns` sections, and the transposed all-rows table are all superseded by this format.
 
 For each table:
-1. Skip empty tables. A table with zero rows carries no data context, so it is excluded from the profile by default. The skipped names are listed once in a trailing summary bullet, e.g. `- Skipped 2 empty table(s): foo, bar`. `ProfileOptions(include_empty_tables=True)` forces their inclusion; an included empty table emits only its flattened `columns:` line (and an empty `all rows` marker), with no `values:` or `samples:` blocks (there is nothing to profile).
-2. Emit a flattened schema header (`columns:`, `indexes:`, `fk:`) derived from introspection. See [Schema header](#schema-header).
+1. Skip empty tables. A table with zero rows carries no data context, so it is excluded from the profile by default. The skipped names are listed once in a trailing summary bullet, e.g. `- Skipped 2 empty table(s): foo, bar`. `ProfileOptions(include_empty_tables=True)` forces their inclusion; an included empty table emits only the bare per-column type tokens in the `columns:` block (and an empty `all rows` marker), with no profile text or `samples:` block (there is nothing to profile).
+2. Emit the schema header: the merged `columns:` block plus the `indexes:` and `fk:` lines, derived from introspection. See [Schema header](#schema-header).
 3. Generate a data profile. See [Per-column profiles](#per-column-profiles) and [Row samples](#row-samples).
    - Use query timeouts to prevent hanging queries. If a query runs for 10s or more → abort the query and skip this metric.
    - Use internal database stats to estimate number of rows. If it's hundreds of millions or more → use the internal stats to generate the profile, don't run any queries. Instead, summarize each column from the engine's catalog statistics (PostgreSQL `pg_stats`, MySQL `COLUMN_STATISTICS` histograms, MariaDB `mysql.column_stats`): approximate null fraction, distinct count, numeric min/max, and top values. Mark these estimates with `≈` and a `(from db stats)` tag so they are distinguishable from exact metrics.
@@ -25,14 +25,12 @@ Each non-empty table renders exactly one block, in this order, separated by blan
 ```
 # <table>  (rows=<N>)
 
-columns: <col>(<type>[,flags]), <col>(<type>[,flags]), ...
+columns:
+<col>(<type>[,flags]): <inline profile>
+<col>(<type>[,flags]): <inline profile>
+...
 indexes: (<cols>)[, (<cols>) [WHERE <cond>]] | none
 fk: <col>→<ref_table>.<ref_col>[, ...] | none
-
-values:
-<col>: <inline profile>
-<col>: <inline profile>
-...
 
 samples:
 | column | latest | sample | sample |
@@ -42,11 +40,11 @@ samples:
 
 For a table with fewer than 10 rows, `samples:` is replaced by `all rows:` and lists every row (see [Small tables](#small-tables)). The `(rows=N)` count in the header uses the engine's row estimate when available, otherwise an exact `COUNT(*)`.
 
-The block layout is intentionally fixed: a reader (human or LLM) can find the schema on line 2, the value distribution in the `values:` block, and concrete examples in the `samples:` block, without scanning a long document.
+The block layout is intentionally fixed: a reader (human or LLM) finds everything about one column — its type, flags, and value distribution — on a single `columns:` line, and concrete examples in the `samples:` block, without scanning a long document. Each column name is printed exactly once.
 
 ### Schema header
 
-The `columns:` line is a flattened, normalized summary of the table shape — one token per column. It replaces the `CREATE TABLE` DDL by default.
+The `columns:` block carries the flattened, normalized table shape — one line per column, in table order, as `name(type[,flags]): <inline profile>`. The token before the colon replaces the `CREATE TABLE` DDL by default; the text after the colon is the column's data profile (see [Per-column profiles](#per-column-profiles)). When there is no profile text (e.g. an included empty table), the line is just the bare token `name(type[,flags])`.
 
 **Column flags (comma-separated, after the type).** Emit only what applies:
 - `PK` — column is (part of) the primary key.
@@ -62,27 +60,27 @@ So `id(bigserial,PK)`, `email(varchar255,UNIQ,NOTNULL)`, `user_id(bigint,FK)`.
 
 **When introspection fails or yields nothing usable**, fall back in this order:
 1. Parse the raw `CREATE TABLE` DDL emitted by mysqldump or pg_dump with a SQL parser (e.g. `sqlglot`) and derive the `columns:`/`indexes:`/`fk:` lines from the parse tree.
-2. If parsing also fails, emit the raw `CREATE TABLE` DDL in a fenced `sql` block in place of the three header lines, and continue with `values:` / `samples:` as usual.
+2. If parsing also fails, emit the raw `CREATE TABLE` DDL in a fenced `sql` block in place of the header, and continue with `samples:` as usual (there is no `columns:` block — column profiling is skipped on this path).
 
 The full DDL is **only** ever emitted as this last-resort fallback. In the normal path, introspection produces the one-liner directly.
 
 ### Per-column profiles
 
-The `values:` block has one line per column, in the same left-to-right order as `columns:`. Everything about a column — distinct count, nulls, min/max, average, median, histogram — goes on that single line. Never split a column's stats across an indented child line.
+Each line of the `columns:` block carries the profile text after the `name(type[,flags]):` token, in the same left-to-right order as the table's columns. Everything about a column — type, flags, distinct count, nulls, min/max, average, median, histogram — goes on that single line. Never split a column's stats across an indented child line.
 
-Apply these rules in order; the first that matches determines the line's form:
+Because the type token sits on the same line, numeric ranges omit the historical `int`/`float`/`numeric` qualifier — `1..12592`, not `int 1..12592`. Apply these rules in order; the first that matches determines the profile text:
 
 1. **All NULL.** Emit `all NULL`.
-2. **Unique identifier** (every present value distinct, high cardinality, e.g. a PK or UUID). Emit `unique identifier` plus the numeric range if the column is numeric (`unique identifier, int 1..12592`). Omit top values. Any nulls are appended: `, nulls=8`.
+2. **Unique identifier** (every present value distinct, high cardinality, e.g. a PK or UUID). Emit `unique identifier` plus the numeric range if the column is numeric (`unique identifier, 1..12592`). Omit top values. Any nulls are appended: `, nulls=8`.
 3. **Low-cardinality column** (fewer than 20 distinct values, present values): emit the full histogram inline as `value=count` pairs, followed by `nulls=N` when non-zero. Quoted string literals; bare numbers/bools. Omit the separate `N distinct` — the histogram is the distribution. Examples:
-   - `status: open=30, closed=20, pending=10, nulls=2`
-   - `delete_on_termination: 0=11986, 1=4812`
-4. **High-cardinality numeric column.** Emit `N distinct` (or `all distinct` when every present value is unique but the column is not an identifier), then the numeric summary `int min..max` (or `float`/`numeric`), then `avg=…` and `median=…` when computed, then `nulls=N` when non-zero, all comma-separated on the same line. Example:
-   - `tick: 4079 distinct, int 1..12592, avg=1944.8, median=1160`
+   - `status(varchar20): open=30, closed=20, pending=10, nulls=2`
+   - `delete_on_termination(bool): 0=11986, 1=4812`
+4. **High-cardinality numeric column.** Emit `N distinct` (or `all distinct` when every present value is unique but the column is not an identifier), then the numeric range `min..max`, then `avg=…` and `median=…` when computed, then `nulls=N` when non-zero, all comma-separated on the same line. Example:
+   - `tick(bigint): 4079 distinct, 1..12592, avg=1944.8, median=1160`
 5. **High-cardinality non-numeric column** (strings, timestamps, etc.). Emit `N distinct` (or `all distinct`) plus optional top-10 values when informative, plus `nulls=N`. For free-text / blob / JSON columns that are per-row diagnostics, add a trailing `← dropped from samples` annotation so a reader knows why the column is absent from `samples:`. Examples:
-   - `command_id: "RECOVER"=6125, "MOVE"=1462, "IDLE"=446, ...`
-   - `message: 2751 distinct  ← dropped from samples (TEXT, per-row diagnostic)`
-   - `json_data: 9437 distinct  ← dropped from samples (TEXT blob, per-row)`
+   - `command_id(varchar30): "RECOVER"=6125, "MOVE"=1462, "IDLE"=446, ...`
+   - `message(varchar512): 2751 distinct  ← dropped from samples (per-row diagnostic)`
+   - `json_data(text): 9437 distinct  ← dropped from samples (blob, per-row)`
 
 **Metric computation rules** (same thresholds as before, retained verbatim — only the rendering changed):
 
@@ -94,7 +92,7 @@ Apply these rules in order; the first that matches determines the line's form:
 - Top-10 most frequent values with counts. n_rows ≤ 100K and indexed → exact. 100K < n_rows and indexed → read `most_common_vals`/`most_common_freqs` from `pg_stats`, MySQL `COLUMN_STATISTICS` histogram buckets, or MariaDB `mysql.column_stats` (`JSON_HB` singletons), if present. n_rows > 100K and unindexed, or no catalog stats available → skip.
 - **Catalog fallback.** When an exact null/non-null count, min/max, or distinct count is skipped because a column is unindexed and the table exceeds the row-count thresholds, fall back to the same catalog statistics and emit a labeled estimate: `nulls≈`, `non_nulls≈`, `min≈`, `max≈`, `distinct≈`. Available on PostgreSQL, MySQL, and MariaDB.
 
-**Sensitive fields.** Never dump values for sensitive fields. Treat column names containing `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token` as sensitive: redact sampled rows and value profiles (emit the column in `values:` with `redacted` instead of a histogram).
+**Sensitive fields.** Never dump values for sensitive fields. Treat column names containing `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token` as sensitive: redact sampled rows and value profiles (emit the column's `columns:` line with `redacted` as the profile text).
 
 ### Row samples
 
@@ -102,7 +100,7 @@ The `samples:` block is a transposed markdown table: one row per column, columns
 
 Only columns whose concrete values add information beyond the `values:` block appear in `samples:`. Exclude sensitive columns. (redacted elsewhere).
 
-Keep numeric ranges, identifiers, timestamps, foreign-key columns, and any column whose `values:` line is merely `N distinct` without a histogram — those benefit from seeing actual values. The header lists every kept column in the same order as `columns:`.
+Keep numeric ranges, identifiers, timestamps, foreign-key columns, and any column whose `columns:` line is merely `N distinct` without a histogram — those benefit from seeing actual values. The header lists every kept column in the same order as the `columns:` block.
 
 Values are rendered as the underlying SQL would print them: timestamps in ISO 8601 with offset, numbers bare, strings bare (no quotes in the samples table), `null` for NULL. Oversized container values (long JSON, large strings) are truncated with a trailing `…`.
 
@@ -113,7 +111,9 @@ A table with fewer than 10 rows uses `all rows:` instead of `samples:`. The bloc
 ```
 # <table>  (rows=<N>)
 
-columns: ...
+columns:
+<col>(<type>[,flags]): <inline profile>
+...
 indexes: ...
 fk: ...
 
@@ -122,7 +122,7 @@ all rows:
 | <col> | <v> | <v> | ... | <v> |
 ```
 
-The `values:` block is still emitted for small tables when any column has a useful profile (null fractions, a small histogram, etc.). When the table is so small that `all rows:` already exposes every value, a column's `values:` line may simply read `<v>=N, <v>=M` (which is the histogram) — this is fine and not considered redundant, since the two blocks serve different readers.
+The profile text in the `columns:` block is still emitted for small tables when any column has a useful profile (null fractions, a small histogram, etc.). When the table is so small that `all rows:` already exposes every value, a column's profile may simply read `<v>=N, <v>=M` (which is the histogram) — this is fine and not considered redundant, since the two blocks serve different readers.
 
 ## Reliability
 
@@ -154,13 +154,12 @@ skipped_technical_tables:
 
 # batch_box_association  (rows=392)
 
-columns: batch_id(bigint,PK,FK), box_id(bigint,PK,FK)
+columns:
+batch_id(bigint,PK,FK): 176 distinct, 5..214
+box_id(bigint,PK,FK): 175 distinct, 17000038..32005989
+
 indexes: (box_id)
 fk: batch_id→batch.id, box_id→box.id
-
-values:
-batch_id: 176 distinct, int 5..214
-box_id: 175 distinct, int 17000038..32005989
 
 samples:
 | column | latest | sample | sample |
@@ -169,14 +168,13 @@ samples:
 
 # batch_port  (rows=7)
 
-columns: id(int,PK), batch_id(bigint,FK), port_short_id(int,FK)
+columns:
+id(int,PK): 5, 6, 7, 8, 9, 10, 11
+batch_id(bigint,FK): 12=2, 15, 16, 17, 20=2
+port_short_id(int,FK): 1=3, 2=4
+
 indexes: none
 fk: batch_id→batch.id, port_short_id→port.short_id
-
-values:
-id: 5, 6, 7, 8, 9, 10, 11
-batch_id: 12=2, 15, 16, 17, 20=2
-port_short_id: 1=3, 2=4
 
 all rows:
 | column | row 1 | row 2 | row 3 | row 4 | row 5 | row 6 | row 7 |
@@ -186,22 +184,23 @@ all rows:
 
 # safety_events  (rows=9713)
 
-columns: id(bigserial,PK), check_name(varchar64), message(varchar512), tick(bigint), time(timestamptz), robot_id(bigint), task_id(bigint), box_id(bigint), command_id(varchar30), param1(bigint), start_tick(bigint), finished_tick(bigint), json_data(text)
+columns:
+id(bigserial,PK): unique identifier, 1..12592
+check_name(varchar64): "InterrobotCollisionsChecker"=4677, "CMDConstraintsCheck"=3343, "StartStateCheck"=1222, "MoveWithLoweredLiftCheck"=399, "LiftSafetyChecker"=60, "LiftDownToInactivePort"=7, "MoveOutboundCheck"=5
+message(varchar512): 2751 distinct  ← dropped from samples (per-row diagnostic)
+tick(bigint): 4079 distinct, 1..12592, avg=1944.8, median=1160
+time(timestamptz): 9713 distinct
+robot_id(bigint): 6=3679, 7=3452, 5=1884, 1=387, 8=268, 3=27, 4=16
+task_id(bigint): 984 distinct, nulls=256, 155269..197255
+box_id(bigint): 248 distinct, nulls=5489, 17000047..32002154
+command_id(varchar30): "RECOVER"=6125, "MOVE"=1462, "IDLE"=446, "LIFT"=400, "ROTATE_WHEELS"=338, "STOP"=300, "TAKE_BOX"=277, "PUT_BOX"=148, "EXTEND_GRIPPER"=87, "ACK_ERROR"=75, "UNCLENCH"=35, "CHECK_ROBOT_READY"=20
+param1(bigint): 117 distinct, -68..4688, avg=756.5, median=1005
+start_tick(bigint): 4314 distinct, 1..12592, avg=1952.8, median=1160
+finished_tick(bigint): 4326 distinct, 2..12594, avg=1985.9, median=1163
+json_data(text): 9437 distinct  ← dropped from samples (blob, per-row)
+
 indexes: (time)
 fk: none
-
-values:
-check_name: "InterrobotCollisionsChecker"=4677, "CMDConstraintsCheck"=3343, "StartStateCheck"=1222, "MoveWithLoweredLiftCheck"=399, "LiftSafetyChecker"=60, "LiftDownToInactivePort"=7, "MoveOutboundCheck"=5
-tick: 4079 distinct, int 1..12592, avg=1944.8, median=1160
-robot_id: 6=3679, 7=3452, 5=1884, 1=387, 8=268, 3=27, 4=16
-task_id: 984 distinct, nulls=256, int 155269..197255
-box_id: 248 distinct, nulls=5489, int 17000047..32002154
-command_id: "RECOVER"=6125, "MOVE"=1462, "IDLE"=446, "LIFT"=400, "ROTATE_WHEELS"=338, "STOP"=300, "TAKE_BOX"=277, "PUT_BOX"=148, "EXTEND_GRIPPER"=87, "ACK_ERROR"=75, "UNCLENCH"=35, "CHECK_ROBOT_READY"=20
-param1: 117 distinct, int -68..4688, avg=756.5, median=1005
-start_tick: 4314 distinct, int 1..12592, avg=1952.8, median=1160
-finished_tick: 4326 distinct, int 2..12594, avg=1985.9, median=1163
-message: 2751 distinct  ← dropped from samples (TEXT, per-row diagnostic)
-json_data: 9437 distinct  ← dropped from samples (TEXT blob, per-row)
 
 samples:
 | column | latest | sample | sample |
