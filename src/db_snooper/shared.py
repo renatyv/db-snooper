@@ -43,6 +43,37 @@ def is_sensitive(column_name: str) -> bool:
     return any(part in lower_name for part in SENSITIVE_NAME_PARTS)
 
 
+# Identifier delimiters per SQLAlchemy dialect name. Column and table names in
+# the profile are always delimited: the delimiter marks where the name ends
+# (names may contain spaces, commas, or parentheses) and shows the exact form
+# to reference the object in generated SQL. Double quotes on PostgreSQL,
+# Oracle, SQLite, and as the ANSI default; backticks on MySQL/MariaDB/BigQuery
+# (double quotes are string literals there); square brackets on SQL Server.
+_IDENT_DELIMITERS: dict[str, tuple[str, str]] = {
+    "postgresql": ('"', '"'),
+    "oracle": ('"', '"'),
+    "sqlite": ('"', '"'),
+    "mysql": ("`", "`"),
+    "mariadb": ("`", "`"),
+    "bigquery": ("`", "`"),
+    "mssql": ("[", "]"),
+}
+_DEFAULT_DELIMITER = ('"', '"')
+
+
+def quote_ident(name: str, dialect_name: str) -> str:
+    """Render ``name`` as a delimited SQL identifier for ``dialect_name``.
+
+    An embedded closing delimiter is escaped by doubling it, per SQL rules
+    (``"]]`` inside T-SQL brackets, doubled quotes/backticks elsewhere).
+    """
+    open_quote, close_quote = _IDENT_DELIMITERS.get(
+        dialect_name, _DEFAULT_DELIMITER
+    )
+    escaped = name.replace(close_quote, close_quote * 2)
+    return f"{open_quote}{escaped}{close_quote}"
+
+
 def is_technical_table(table_name: str) -> bool:
     return table_name.lower() in TECHNICAL_TABLES
 

@@ -7,8 +7,10 @@ from sqlalchemy import Table
 from sqlalchemy.engine import Connection
 from sqlalchemy.schema import ForeignKeyConstraint, UniqueConstraint
 
+from db_snooper.shared import quote_ident
+
 # The one-block-per-table format flattens a table's shape into a merged
-# ``columns:`` block (one ``name(type[,flags]): profile`` line per column, see
+# ``columns:`` block (one ``"name" type[ flags]`` line per column, see
 # core.py) plus the ``indexes:``/``fk:`` one-liners, all derived from SQLAlchemy
 # introspection. These helpers replace the historical ``CREATE TABLE`` DDL block
 # in the normal path; DDL survives only as a last-resort fallback (see core.py).
@@ -19,11 +21,14 @@ def format_column_tokens(
     conn: Connection,
     type_overrides: dict[str, str] | None = None,
 ) -> list[tuple[str, str]]:
-    """Render every column as a ``name(type[,flags])`` token, in table order.
+    """Render every column as a ``"name" type[ flags]`` token, in table order.
 
-    Returns ``(column_name, token)`` pairs so the caller can join each token
-    with the column's profile by name (the catalog-stats path may skip columns,
-    so a positional zip with the profile list is not safe).
+    The name is always delimited (see :func:`db_snooper.shared.quote_ident`) so
+    the name/type boundary stays unambiguous even when the name contains
+    spaces or parentheses. Returns ``(column_name, token)`` pairs so the caller
+    can join each token with the column's profile by name (the catalog-stats
+    path may skip columns, so a positional zip with the profile list is not
+    safe).
 
     Flags, emitted only when they apply and in this order: ``PK`` (primary-key
     member), ``UNIQ`` (single-column UNIQUE), ``NOTNULL`` (NOT NULL, not already
@@ -33,6 +38,7 @@ def format_column_tokens(
     :func:`db_snooper.profiling.columns.sqlite_storage_info` — SQLite storage
     classes can contradict or replace the declared type).
     """
+    dialect_name = conn.dialect.name
     pk_names = {column.name for column in table.primary_key.columns}
     single_uniques = _single_column_unique_names(table)
     single_fks = _single_column_fk_names(table)
@@ -51,14 +57,16 @@ def format_column_tokens(
             flags.append("NOTNULL")
         if column.name in single_fks:
             flags.append("FK")
-        suffix = f",{','.join(flags)}" if flags else ""
-        tokens.append((column.name, f"{column.name}({type_token}{suffix})"))
+        suffix = " " + " ".join(flags) if flags else ""
+        name = quote_ident(column.name, dialect_name)
+        tokens.append((column.name, f"{name} {type_token}{suffix}"))
     return tokens
 
 
 def format_indexes_line(table: Table, conn: Connection) -> str:
     """Render non-PK indexes as parenthesized column lists.
 
+    Column names are delimited (same rule as the ``columns:`` block).
     Multi-column indexes keep their declared column order. Partial/conditional
     indexes append ``WHERE <predicate>``. Returns ``none`` when there are no
     non-PK indexes. The primary-key index is never repeated here.
@@ -70,7 +78,7 @@ def format_indexes_line(table: Table, conn: Connection) -> str:
         # Skip an index that exactly mirrors the primary key.
         if cols and cols in pk_columns:
             continue
-        entry = "(" + ",".join(cols) + ")"
+        entry = _join_columns(list(cols), conn.dialect.name)
         predicate = _index_predicate(index, conn.dialect.name)
         if predicate:
             entry += f" WHERE {predicate}"
@@ -81,11 +89,11 @@ def format_indexes_line(table: Table, conn: Connection) -> str:
     return "indexes: " + ", ".join(entries)
 
 
-def format_fk_line(table: Table) -> str:
-    """Render foreign keys as ``col→ref_table.ref_col``.
+def format_fk_line(table: Table, dialect_name: str) -> str:
+    """Render foreign keys as ``"col"→"ref_table"."ref_col"``.
 
-    Composite FKs render as ``(c1,c2)→ref_table.(r1,r2)``. ``none`` when the
-    table has no foreign keys.
+    Composite FKs render as ``("c1","c2")→"ref_table".("r1","r2")``. ``none``
+    when the table has no foreign keys.
     """
     entries: list[str] = []
     for constraint in table.constraints:
@@ -100,18 +108,19 @@ def format_fk_line(table: Table) -> str:
         for element in elements:
             ref_table = element.column.table.name
             ref_cols.append(element.column.name)
-        local_side = _join_columns(local)
-        ref_side = _join_columns(ref_cols)
-        entries.append(f"{local_side}→{ref_table}.{ref_side}")
+        local_side = _join_columns(local, dialect_name)
+        ref_side = _join_columns(ref_cols, dialect_name)
+        quoted_table = quote_ident(ref_table, dialect_name)
+        entries.append(f"{local_side}→{quoted_table}.{ref_side}")
     if not entries:
         return "fk: none"
     return "fk: " + ", ".join(entries)
 
 
-def _join_columns(cols: list[str]) -> str:
+def _join_columns(cols: list[str], dialect_name: str) -> str:
     if len(cols) == 1:
-        return cols[0]
-    return "(" + ",".join(cols) + ")"
+        return quote_ident(cols[0], dialect_name)
+    return "(" + ",".join(quote_ident(col, dialect_name) for col in cols) + ")"
 
 
 def _single_column_unique_names(table: Table) -> set[str]:

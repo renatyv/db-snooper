@@ -28,14 +28,14 @@ from db_snooper.profiling.columns import (
     profile_column,
 )
 from db_snooper.profiling.models import ColumnProfile
-from db_snooper.shared import is_sensitive
+from db_snooper.shared import is_sensitive, quote_ident
 
 
 @dataclass
 class TableProfile:
     """Structured profile for a single table, rendered as one compact block.
 
-    The normal path fills ``column_tokens`` (``(name, "name(type[,flags])")``
+    The normal path fills ``column_tokens`` (``(name, '"name" type[ flags]')``
     pairs merged with ``column_profiles`` into the ``columns:`` block) plus
     ``indexes_line``/``fk_line``. When introspection fully fails, ``raw_ddl``
     holds the last-resort CREATE TABLE block (rendered as a fenced ``sql``
@@ -116,24 +116,29 @@ def collect_relationships(
 
 
 def format_relationships(
-    relationships: list[Relationship], schema: str | None
+    relationships: list[Relationship], schema: str | None, dialect_name: str
 ) -> list[str]:
-    """Render foreign keys as ``- parent.col ← child.col`` bullets.
+    """Render foreign keys as ``- "parent"."col" ← "child"."col"`` bullets.
 
     The parent (referenced) column leads each line and the arrow points back
     at the children that reference it, so a column referenced by many tables
-    reads as ``- parent.col ← child1.col, child2.col``. The arrow always
-    points parent ← child regardless of how many children there are, keeping
-    the section's direction consistent. Lines are sorted by parent, turning
-    the section into an index of "what references each parent column".
+    reads as ``- "parent"."col" ← "child1"."col", "child2"."col"``. The arrow
+    always points parent ← child regardless of how many children there are,
+    keeping the section's direction consistent. Lines are sorted by parent,
+    turning the section into an index of "what references each parent column".
 
-    Composite keys render as ``table.(c1, c2)``. The parent table is
-    schema-qualified only when it lives in a different schema than the one
-    being profiled, keeping the common single-schema case compact.
+    Table and column names are delimited (see
+    :func:`db_snooper.shared.quote_ident`), so each side reads like the
+    qualified column reference to use in a join. Composite keys render as
+    ``"table".("c1", "c2")``. The parent table is schema-qualified only when
+    it lives in a different schema than the one being profiled, keeping the
+    common single-schema case compact.
     """
     groups: dict[str, list[Relationship]] = {}
     for rel in relationships:
-        groups.setdefault(_parent_display(rel, schema), []).append(rel)
+        groups.setdefault(_parent_display(rel, schema, dialect_name), []).append(
+            rel
+        )
 
     lines: list[str] = []
     for parent, rels in sorted(groups.items()):
@@ -141,7 +146,7 @@ def format_relationships(
         children: list[str] = []
         for rel in rels:
             child = _format_relationship_side(
-                rel.constrained_table, rel.constrained_columns
+                (rel.constrained_table,), rel.constrained_columns, dialect_name
             )
             if child not in children:
                 children.append(child)
@@ -149,19 +154,23 @@ def format_relationships(
     return lines
 
 
-def _format_relationship_side(table: str, columns: tuple[str, ...]) -> str:
+def _format_relationship_side(
+    table_parts: tuple[str, ...], columns: tuple[str, ...], dialect_name: str
+) -> str:
+    qualified = ".".join(quote_ident(part, dialect_name) for part in table_parts)
     if len(columns) == 1:
-        return f"{table}.{columns[0]}"
-    return f"{table}.({', '.join(columns)})"
+        return f"{qualified}.{quote_ident(columns[0], dialect_name)}"
+    quoted = ", ".join(quote_ident(col, dialect_name) for col in columns)
+    return f"{qualified}.({quoted})"
 
 
-def _parent_display(rel: Relationship, schema: str | None) -> str:
+def _parent_display(rel: Relationship, schema: str | None, dialect_name: str) -> str:
     """Render the parent (referred) side of ``rel``, schema-qualifying it only
     when it lives outside the schema being profiled."""
-    parent_table = rel.referred_table
+    parts = (rel.referred_table,)
     if rel.referred_schema and rel.referred_schema != schema:
-        parent_table = f"{rel.referred_schema}.{rel.referred_table}"
-    return _format_relationship_side(parent_table, rel.referred_columns)
+        parts = (rel.referred_schema, rel.referred_table)
+    return _format_relationship_side(parts, rel.referred_columns, dialect_name)
 
 
 @dataclass

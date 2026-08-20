@@ -11,7 +11,7 @@ Generate a single `db_/schema.md` profile per schema by default. When requested 
 The profile is written in a **compact one-block-per-table** format (see [Output format](#output-format)). Every table renders its schema and per-column value profiles in one merged `columns:` block, plus row samples, in a single contiguous block of roughly 15–30 lines regardless of column count. The historical `CREATE TABLE` DDL block, the separate `## Indexes` / `## Rows` / `## Columns` sections, and the transposed all-rows table are all superseded by this format.
 
 For each table:
-1. Skip empty tables. A table with zero rows carries no data context, so it is excluded from the profile by default. The skipped names are listed once in a trailing summary bullet, e.g. `- Skipped 2 empty table(s): foo, bar`. `ProfileOptions(include_empty_tables=True)` forces their inclusion; an included empty table emits only the bare per-column type tokens in the `columns:` block (and an empty `all rows` marker), with no profile text or `samples:` block (there is nothing to profile).
+1. Skip empty tables. A table with zero rows carries no data context, so it is excluded from the profile by default. The skipped names are listed once in a trailing summary bullet, e.g. `- Skipped 2 empty table(s): "foo", "bar"`. `ProfileOptions(include_empty_tables=True)` forces their inclusion; an included empty table emits only the bare per-column type tokens in the `columns:` block (and an empty `all rows` marker), with no profile text or `samples:` block (there is nothing to profile).
 2. Emit the schema header: the merged `columns:` block plus the `indexes:` and `fk:` lines, derived from introspection. See [Schema header](#schema-header).
 3. Generate a data profile. See [Per-column profiles](#per-column-profiles) and [Row samples](#row-samples).
    - Use query timeouts to prevent hanging queries. If a query runs for 10s or more → abort the query and skip this metric.
@@ -23,14 +23,14 @@ For each table:
 Each non-empty table renders exactly one block, in this order, separated by blank lines:
 
 ```
-# <table>  (rows=<N>)
+# "<table>"  (rows=<N>)
 
 columns:
-<col>(<type>[,flags]): <inline profile>
-<col>(<type>[,flags]): <inline profile>
+"<col>" <type>[ flags]: <inline profile>
+"<col>" <type>[ flags]: <inline profile>
 ...
-indexes: (<cols>)[, (<cols>) [WHERE <cond>]] | none
-fk: <col>→<ref_table>.<ref_col>[, ...] | none
+indexes: ("<cols>")[, ("<cols>") [WHERE <cond>]] | none
+fk: "<col>"→"<ref_table>"."<ref_col>"[, ...] | none
 
 samples:
 | column | latest | sample | sample |
@@ -44,25 +44,25 @@ The block layout is intentionally fixed: a reader (human or LLM) finds everythin
 
 ### Schema header
 
-The `columns:` block carries the flattened, normalized table shape — one line per column, in table order, as `name(type[,flags]): <inline profile>`. The token before the colon replaces the `CREATE TABLE` DDL by default; the text after the colon is the column's data profile (see [Per-column profiles](#per-column-profiles)). When there is no profile text (e.g. an included empty table), the line is just the bare token `name(type[,flags])`.
+The `columns:` block carries the flattened, normalized table shape — one line per column, in table order, as `"<name>" <type>[ flags]: <inline profile>`. The name is **always rendered as a delimited identifier** (`"Enrollment (K-12)"`): the delimiter marks where the name ends (names may contain spaces, commas, or parentheses) and shows the exact quoting to use when referencing the column in SQL — double quotes on PostgreSQL/Oracle/SQLite (and any other dialect), backticks on MySQL/MariaDB/BigQuery, square brackets on SQL Server. Table names are delimited the same way everywhere they appear — the block header `# "frpm"`, the `fk:` target, and the `Relationships` bullets — so every identifier in the profile reads as the exact reference to use in SQL. The token before the colon replaces the `CREATE TABLE` DDL by default; the text after the colon is the column's data profile (see [Per-column profiles](#per-column-profiles)). When there is no profile text (e.g. an included empty table), the line is just the bare token `"<name>" <type>[ flags]`.
 
-**Column flags (comma-separated, after the type).** Emit only what applies:
+**Column flags (space-separated, after the type).** Emit only what applies:
 - `PK` — column is (part of) the primary key.
 - `UNIQ` — column has a single-column `UNIQUE` constraint.
 - `NOTNULL` — column is `NOT NULL` and not already `PK` (PK implies NOT NULL, so don't repeat it).
 - `FK` — column has a single-column foreign key (the target is listed in the `fk:` line).
 
-So `id(bigserial,PK)`, `email(varchar255,UNIQ,NOTNULL)`, `user_id(bigint,FK)`.
+So `"id" bigserial PK`, `"email" varchar255 UNIQ NOTNULL`, `"user_id" bigint FK`.
 
 **Type tokens come from the declared type — unless the data contradicts it (SQLite).** SQLite's declared types are affinity hints, not constraints. Profiling reads the actual per-value storage classes via `typeof(col)` and overrides the token when the declaration is missing or wrong:
 
-- A column declared with no type at all renders its storage class: `x(int)`, or `x(int|text)` when mixed — never a confusing `null` token.
-- A declared type that shares no storage class with the stored data renders `declared→stored`: `qty(numeric→text)` — the case where numeric comparisons quietly become lexicographic. Storage classes map to the usual tokens: `integer`→`int`, `real`→`float`, `text`→`text`, `blob`→`bytes`.
+- A column declared with no type at all renders its storage class: `"x" int`, or `"x" int|text` when mixed — never a confusing `null` token.
+- A declared type that shares no storage class with the stored data renders `declared→stored`: `"qty" numeric→text` — the case where numeric comparisons quietly become lexicographic. Storage classes map to the usual tokens: `integer`→`int`, `real`→`float`, `text`→`text`, `blob`→`bytes`.
 - Numeric profiling (min/max, average, median) is skipped for a numeric-declared column whose storage is not purely numeric; the histogram carries the values instead.
 
-**`indexes:`** lists each index as a parenthesized column list. Multi-column indexes keep their column order: `(instance_uuid,volume_id)`. Partial/conditional indexes append the predicate: `(batch_id,box_id) WHERE box_id > 12`. The primary-key index is not repeated here. `none` when there are no non-PK indexes.
+**`indexes:`** lists each index as a parenthesized column list, names delimited like in `columns:`. Multi-column indexes keep their column order: `("instance_uuid","volume_id")`. Partial/conditional indexes append the predicate: `("batch_id","box_id") WHERE box_id > 12`. The primary-key index is not repeated here. `none` when there are no non-PK indexes.
 
-**`fk:`** lists each foreign key as `col→ref_table.ref_col`. Multi-column FKs use `(col1,col2)→ref_table.(ref1,ref2)`. `none` when there are none.
+**`fk:`** lists each foreign key as `"col"→"ref_table"."ref_col"`. Multi-column FKs use `("col1","col2")→"ref_table".("ref1","ref2")`. `none` when there are none.
 
 **When introspection fails or yields nothing usable**, fall back in this order:
 1. Parse the raw `CREATE TABLE` DDL emitted by mysqldump or pg_dump with a SQL parser (e.g. `sqlglot`) and derive the `columns:`/`indexes:`/`fk:` lines from the parse tree.
@@ -72,21 +72,21 @@ The full DDL is **only** ever emitted as this last-resort fallback. In the norma
 
 ### Per-column profiles
 
-Each line of the `columns:` block carries the profile text after the `name(type[,flags]):` token, in the same left-to-right order as the table's columns. Everything about a column — type, flags, distinct count, nulls, min/max, average, median, histogram — goes on that single line. Never split a column's stats across an indented child line.
+Each line of the `columns:` block carries the profile text after the `"<name>" <type>[ flags]:` token, in the same left-to-right order as the table's columns. Everything about a column — type, flags, distinct count, nulls, min/max, average, median, histogram — goes on that single line. Never split a column's stats across an indented child line.
 
 Because the type token sits on the same line, numeric ranges omit the historical `int`/`float`/`numeric` qualifier — `1..12592`, not `int 1..12592`. Apply these rules in order; the first that matches determines the profile text:
 
 1. **All NULL.** Emit `all NULL`.
 2. **Unique identifier** (every present value distinct, high cardinality, e.g. a PK or UUID). Emit `unique identifier` plus the numeric range if the column is numeric (`unique identifier, 1..12592`). Omit top values. Any nulls are appended: `, nulls=8`.
 3. **Low-cardinality column** (fewer than 20 distinct values, present values): emit the full histogram inline as `value=count` pairs, followed by `nulls=N` when non-zero. Quoted string literals; bare numbers/bools. Omit the separate `N distinct` — the histogram is the distribution. Examples:
-   - `status(varchar20): open=30, closed=20, pending=10, nulls=2`
-   - `delete_on_termination(bool): 0=11986, 1=4812`
+   - `"status" varchar20: open=30, closed=20, pending=10, nulls=2`
+   - `"delete_on_termination" bool: 0=11986, 1=4812`
 4. **High-cardinality numeric column.** Emit `N distinct` (or `all distinct` when every present value is unique but the column is not an identifier), then the numeric range `min..max`, then `avg=…` and `median=…` when computed, then `nulls=N` when non-zero, all comma-separated on the same line. Example:
-   - `tick(bigint): 4079 distinct, 1..12592, avg=1944.8, median=1160`
+   - `"tick" bigint: 4079 distinct, 1..12592, avg=1944.8, median=1160`
 5. **High-cardinality non-numeric column** (strings, timestamps, etc.). Emit `N distinct` (or `all distinct`) plus optional top-10 values when informative, plus `nulls=N`. For free-text / blob / JSON columns that are per-row diagnostics, add a trailing `← dropped from samples` annotation so a reader knows why the column is absent from `samples:`. Examples:
-   - `command_id(varchar30): "RECOVER"=6125, "MOVE"=1462, "IDLE"=446, ...`
-   - `message(varchar512): 2751 distinct  ← dropped from samples (per-row diagnostic)`
-   - `json_data(text): 9437 distinct  ← dropped from samples (blob, per-row)`
+   - `"command_id" varchar30: "RECOVER"=6125, "MOVE"=1462, "IDLE"=446, ...`
+   - `"message" varchar512: 2751 distinct  ← dropped from samples (per-row diagnostic)`
+   - `"json_data" text: 9437 distinct  ← dropped from samples (blob, per-row)`
 
 **Content shape for string columns.** A declared `text`/`varchar` token says nothing about what the strings contain — and CSV-imported databases (SQLite especially) park numbers, dates, and booleans in text columns. For a string column whose line does not already show its values (high-cardinality, no histogram), classify a bounded sample (≤1000 values) of its non-null values and prepend the first matching label:
 
@@ -98,9 +98,9 @@ Because the type token sits on the same line, numeric ranges omit the historical
 
 Every non-null value must match; mixed columns and columns with an inlined histogram (whose quoted values already show the content) get no label. Examples:
 
-- `County Code(text): digits, 58 distinct`
-- `CDSCode(text,PK,FK): digits, unique identifier`
-- `event_date(text): iso-date, 41 distinct`
+- `"County Code" text: digits, 58 distinct`
+- `"CDSCode" text PK FK: digits, unique identifier`
+- `"event_date" text: iso-date, 41 distinct`
 
 **Metric computation rules** (same thresholds as before, retained verbatim — only the rendering changed):
 
@@ -130,10 +130,10 @@ Values are rendered as the underlying SQL would print them: timestamps in ISO 86
 A table with fewer than 10 rows uses `all rows:` instead of `samples:`. The block is otherwise identical:
 
 ```
-# <table>  (rows=<N>)
+# "<table>"  (rows=<N>)
 
 columns:
-<col>(<type>[,flags]): <inline profile>
+"<col>" <type>[ flags]: <inline profile>
 ...
 indexes: ...
 fk: ...
@@ -164,38 +164,38 @@ dialect: postgresql
 database: dw
 schema: public
 skipped_technical_tables:
-  - migrations
+  - "migrations"
 ---
 
 ## Relationships
 
-- batch.id ← batch_box_association.batch_id, batch_port.batch_id
-- box.id ← batch_box_association.box_id
-- port.short_id ← batch_port.port_short_id
+- "batch"."id" ← "batch_box_association"."batch_id", "batch_port"."batch_id"
+- "box"."id" ← "batch_box_association"."box_id"
+- "port"."short_id" ← "batch_port"."port_short_id"
 
-# batch_box_association  (rows=392)
+# "batch_box_association"  (rows=392)
 
 columns:
-batch_id(bigint,PK,FK): 176 distinct, 5..214
-box_id(bigint,PK,FK): 175 distinct, 17000038..32005989
+"batch_id" bigint PK FK: 176 distinct, 5..214
+"box_id" bigint PK FK: 175 distinct, 17000038..32005989
 
-indexes: (box_id)
-fk: batch_id→batch.id, box_id→box.id
+indexes: ("box_id")
+fk: "batch_id"→"batch"."id", "box_id"→"box"."id"
 
 samples:
 | column | latest | sample | sample |
 | batch_id | 215 | 12 | 1124 |
 | box_id | 32000246 | 17000123 | 17000001 |
 
-# batch_port  (rows=7)
+# "batch_port"  (rows=7)
 
 columns:
-id(int,PK): 5, 6, 7, 8, 9, 10, 11
-batch_id(bigint,FK): 12=2, 15, 16, 17, 20=2
-port_short_id(int,FK): 1=3, 2=4
+"id" int PK: 5, 6, 7, 8, 9, 10, 11
+"batch_id" bigint FK: 12=2, 15, 16, 17, 20=2
+"port_short_id" int FK: 1=3, 2=4
 
 indexes: none
-fk: batch_id→batch.id, port_short_id→port.short_id
+fk: "batch_id"→"batch"."id", "port_short_id"→"port"."short_id"
 
 all rows:
 | column | row 1 | row 2 | row 3 | row 4 | row 5 | row 6 | row 7 |
@@ -203,24 +203,24 @@ all rows:
 | batch_id | 12 | 12 | 15 | 16 | 17 | 20 | 20 |
 | port_short_id | 1 | 2 | 1 | 2 | 2 | 1 | 2 |
 
-# safety_events  (rows=9713)
+# "safety_events"  (rows=9713)
 
 columns:
-id(bigserial,PK): unique identifier, 1..12592
-check_name(varchar64): "InterrobotCollisionsChecker"=4677, "CMDConstraintsCheck"=3343, "StartStateCheck"=1222, "MoveWithLoweredLiftCheck"=399, "LiftSafetyChecker"=60, "LiftDownToInactivePort"=7, "MoveOutboundCheck"=5
-message(varchar512): 2751 distinct  ← dropped from samples (per-row diagnostic)
-tick(bigint): 4079 distinct, 1..12592, avg=1944.8, median=1160
-time(timestamptz): 9713 distinct
-robot_id(bigint): 6=3679, 7=3452, 5=1884, 1=387, 8=268, 3=27, 4=16
-task_id(bigint): 984 distinct, nulls=256, 155269..197255
-box_id(bigint): 248 distinct, nulls=5489, 17000047..32002154
-command_id(varchar30): "RECOVER"=6125, "MOVE"=1462, "IDLE"=446, "LIFT"=400, "ROTATE_WHEELS"=338, "STOP"=300, "TAKE_BOX"=277, "PUT_BOX"=148, "EXTEND_GRIPPER"=87, "ACK_ERROR"=75, "UNCLENCH"=35, "CHECK_ROBOT_READY"=20
-param1(bigint): 117 distinct, -68..4688, avg=756.5, median=1005
-start_tick(bigint): 4314 distinct, 1..12592, avg=1952.8, median=1160
-finished_tick(bigint): 4326 distinct, 2..12594, avg=1985.9, median=1163
-json_data(text): 9437 distinct  ← dropped from samples (blob, per-row)
+"id" bigserial PK: unique identifier, 1..12592
+"check_name" varchar64: "InterrobotCollisionsChecker"=4677, "CMDConstraintsCheck"=3343, "StartStateCheck"=1222, "MoveWithLoweredLiftCheck"=399, "LiftSafetyChecker"=60, "LiftDownToInactivePort"=7, "MoveOutboundCheck"=5
+"message" varchar512: 2751 distinct  ← dropped from samples (per-row diagnostic)
+"tick" bigint: 4079 distinct, 1..12592, avg=1944.8, median=1160
+"time" timestamptz: 9713 distinct
+"robot_id" bigint: 6=3679, 7=3452, 5=1884, 1=387, 8=268, 3=27, 4=16
+"task_id" bigint: 984 distinct, nulls=256, 155269..197255
+"box_id" bigint: 248 distinct, nulls=5489, 17000047..32002154
+"command_id" varchar30: "RECOVER"=6125, "MOVE"=1462, "IDLE"=446, "LIFT"=400, "ROTATE_WHEELS"=338, "STOP"=300, "TAKE_BOX"=277, "PUT_BOX"=148, "EXTEND_GRIPPER"=87, "ACK_ERROR"=75, "UNCLENCH"=35, "CHECK_ROBOT_READY"=20
+"param1" bigint: 117 distinct, -68..4688, avg=756.5, median=1005
+"start_tick" bigint: 4314 distinct, 1..12592, avg=1952.8, median=1160
+"finished_tick" bigint: 4326 distinct, 2..12594, avg=1985.9, median=1163
+"json_data" text: 9437 distinct  ← dropped from samples (blob, per-row)
 
-indexes: (time)
+indexes: ("time")
 fk: none
 
 samples:
@@ -231,7 +231,7 @@ samples:
 | command_id | PUT_BOX | RECOVER | MOVE |
 | task_id | 197255 | 189944 | null |
 
-- Skipped 1 empty table(s): archived_events
+- Skipped 1 empty table(s): "archived_events"
 ````
 
 ## Implementation

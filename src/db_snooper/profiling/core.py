@@ -30,6 +30,7 @@ from db_snooper.profiling.tables import (
 )
 from db_snooper.profiling.utility_dump import dump_create_table
 from db_snooper.query_timeout import BigQueryBudget
+from db_snooper.shared import quote_ident
 
 
 def profile_schema(
@@ -65,7 +66,7 @@ def profile_schema(
     if skipped_technical_tables:
         lines.append("skipped_technical_tables:")
         for name in sorted(skipped_technical_tables):
-            lines.append(f"  - {name}")
+            lines.append(f"  - {quote_ident(name, engine.dialect.name)}")
     lines.append("---")
     lines.append("")
 
@@ -83,6 +84,7 @@ def profile_schema(
         relationship_lines = format_relationships(
             collect_relationships(inspect(engine), tables, options.schema),
             options.schema,
+            engine.dialect.name,
         )
         if relationship_lines:
             lines.append("## Relationships")
@@ -159,17 +161,22 @@ def profile_schema(
                 progress(index, len(tables), table_name)
 
     if failed_ddl_tables:
+        names = ", ".join(
+            quote_ident(name, engine.dialect.name) for name in failed_ddl_tables
+        )
         summary = (
             f"Skipped {len(failed_ddl_tables)} table(s) due to DDL generation "
-            f"errors: {', '.join(failed_ddl_tables)}"
+            f"errors: {names}"
         )
         lines.append(f"- {summary}")
         lines.append("")
 
     if skipped_empty_tables:
-        summary = f"Skipped {len(skipped_empty_tables)} empty table(s): " + ", ".join(
-            sorted(skipped_empty_tables)
+        names = ", ".join(
+            quote_ident(name, engine.dialect.name)
+            for name in sorted(skipped_empty_tables)
         )
+        summary = f"Skipped {len(skipped_empty_tables)} empty table(s): {names}"
         lines.append(f"- {summary}")
         lines.append("")
 
@@ -231,7 +238,10 @@ def _profile_one_table(
             ddl = None
         if ddl is not None:
             raw_ddl = ddl.create_table
-            fallback_note = f"- {table_name}: CREATE TABLE via utility fallback"
+            fallback_note = (
+                f"- {quote_ident(table_name, engine.dialect.name)}: "
+                "CREATE TABLE via utility fallback"
+            )
 
     if table is None and raw_ddl is None:
         # Introspection and the utility fallback both failed; the caller marks
@@ -272,7 +282,7 @@ def _profile_one_table(
         )
         if raw_ddl is None:
             table_profile.indexes_line = format_indexes_line(table, conn)
-            table_profile.fk_line = format_fk_line(table)
+            table_profile.fk_line = format_fk_line(table, conn.dialect.name)
     else:
         # Introspection unavailable; only the raw DDL block remains.
         table_profile = TableProfile(
@@ -296,9 +306,9 @@ def _emit_table_block(
     """Append the one-block-per-table rendering to ``lines``.
 
     Layout (blank-line-separated):
-        # <table>  (rows=<N>)
+        # "<table>"  (rows=<N>)
         columns:
-        <col>(<type>[,flags]): <inline profile>
+        "<col>" <type>[ flags]: <inline profile>
         indexes: ...
         fk: ...
         samples: / all rows:
@@ -315,7 +325,7 @@ def _emit_table_block(
             row_display = str(size_info.total_rows)
         elif size_info.estimate is not None:
             row_display = f"≈{size_info.estimate}"
-    header = f"# {table_name}"
+    header = f"# {quote_ident(table_name, conn.dialect.name)}"
     if row_display:
         header += f"  (rows={row_display})"
     lines.append(header)
@@ -331,7 +341,7 @@ def _emit_table_block(
         lines.append("")
 
     # columns: block — the merged schema + per-column profile. Each column is
-    # one ``name(type[,flags]): profile`` line. Included empty tables carry no
+    # one ``"name" type[ flags]: profile`` line. Included empty tables carry no
     # data context, so they emit bare tokens with no profile text; columns the
     # stats path skipped render as bare tokens too.
     is_empty_included = (
