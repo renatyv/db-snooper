@@ -14,7 +14,11 @@ from sqlalchemy.schema import ForeignKeyConstraint, UniqueConstraint
 # in the normal path; DDL survives only as a last-resort fallback (see core.py).
 
 
-def format_column_tokens(table: Table, conn: Connection) -> list[tuple[str, str]]:
+def format_column_tokens(
+    table: Table,
+    conn: Connection,
+    type_overrides: dict[str, str] | None = None,
+) -> list[tuple[str, str]]:
     """Render every column as a ``name(type[,flags])`` token, in table order.
 
     Returns ``(column_name, token)`` pairs so the caller can join each token
@@ -24,14 +28,20 @@ def format_column_tokens(table: Table, conn: Connection) -> list[tuple[str, str]
     Flags, emitted only when they apply and in this order: ``PK`` (primary-key
     member), ``UNIQ`` (single-column UNIQUE), ``NOTNULL`` (NOT NULL, not already
     PK), ``FK`` (single-column foreign key). The type token is the dialect-
-    specific SQL type, compacted (see :func:`compact_type_string`).
+    specific SQL type, compacted (see :func:`compact_type_string`), unless
+    ``type_overrides`` supplies a data-derived replacement for the column (see
+    :func:`db_snooper.profiling.columns.sqlite_storage_info` — SQLite storage
+    classes can contradict or replace the declared type).
     """
     pk_names = {column.name for column in table.primary_key.columns}
     single_uniques = _single_column_unique_names(table)
     single_fks = _single_column_fk_names(table)
+    overrides = type_overrides or {}
     tokens: list[tuple[str, str]] = []
     for column in table.columns:
-        type_token = compact_type_string(column, conn.dialect)
+        type_token = overrides.get(column.name) or compact_type_string(
+            column, conn.dialect
+        )
         flags = []
         if column.name in pk_names:
             flags.append("PK")

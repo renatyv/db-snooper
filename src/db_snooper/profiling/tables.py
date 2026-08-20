@@ -4,9 +4,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import Table, desc, func, select, text
+from sqlalchemy import Float, Numeric, Table, desc, func, select, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.sql.elements import Label
+from sqlalchemy.sql.sqltypes import NullType
 
 from db_snooper import query_timeout
 from db_snooper.contracts import ProfileOptions
@@ -390,10 +392,17 @@ def profile_table(
 
     if total_rows <= options.small_table_threshold:
         sampled: list[dict[str, Any]] = []
-        with query_timeout.metric([], "sampled rows"):
-            sampled = sample_rows(
-                conn, table, options.small_table_threshold, options.query_timeout
-            )
+        note: str | None = None
+        try:
+            with query_timeout.metric([], "sampled rows"):
+                sampled = sample_rows(
+                    conn, table, options.small_table_threshold, options.query_timeout
+                )
+        except (TypeError, ValueError):
+            # Result-processor crash (e.g. a date-typed SQLite column holding
+            # garbage text): keep profiling, drop only the row dump.
+            sampled = []
+            note = "sampled rows skipped (unreadable values)"
         labels = [f"row {index + 1}" for index in range(len(sampled))]
         column_profiles = _profile_all_columns(
             conn, table, options, int(total_rows), report_column
@@ -408,15 +417,20 @@ def profile_table(
             sample_labels=labels,
             is_small_table_all_rows=True,
             row_count_display=str(total_rows),
+            note=note,
         )
 
     # Larger table: latest + random rows, then per-column profiles.
     row_skips: list[tuple[str, str]] = []
     latest: list[dict[str, Any]] = []
-    with query_timeout.metric(row_skips, "latest rows"):
-        latest = latest_rows(
-            conn, table, options.latest_row_limit, options.query_timeout
-        )
+    try:
+        with query_timeout.metric(row_skips, "latest rows"):
+            latest = latest_rows(
+                conn, table, options.latest_row_limit, options.query_timeout
+            )
+    except (TypeError, ValueError):
+        latest = []
+        row_skips.append(("latest rows", "unreadable values"))
     random_sample: list[dict[str, Any]] = []
     dialect = conn.dialect.name
     if dialect in {"mysql", "mariadb"}:
@@ -430,14 +444,18 @@ def profile_table(
             ("random rows", "disabled by ProfileOptions(random_sample_percent=0)")
         )
     else:
-        with query_timeout.metric(row_skips, "random rows"):
-            random_sample = random_rows(
-                conn,
-                table,
-                options.random_row_limit,
-                options.query_timeout,
-                options.random_sample_percent,
-            )
+        try:
+            with query_timeout.metric(row_skips, "random rows"):
+                random_sample = random_rows(
+                    conn,
+                    table,
+                    options.random_row_limit,
+                    options.query_timeout,
+                    options.random_sample_percent,
+                )
+        except (TypeError, ValueError):
+            random_sample = []
+            row_skips.append(("random rows", "unreadable values"))
 
     combined = list(latest) + list(random_sample)
     labels = ["latest"] * len(latest) + ["sample"] * len(random_sample)
@@ -496,11 +514,30 @@ def _profile_all_columns(
     return profiles
 
 
+def _sample_select(conn: Connection, table: Table) -> Any:
+    """SELECT over every column, neutralizing SQLite's numeric processors.
+
+    REAL/NUMERIC affinity keeps non-convertible text, and SQLAlchemy's Decimal
+    result processor then raises while fetching the row. NullType labels fetch
+    raw values for those columns (SQLite only — other dialects enforce their
+    numeric types).
+    """
+    if conn.dialect.name != "sqlite":
+        return select(table)
+    columns = [
+        Label(column.name, column, type_=NullType())
+        if isinstance(column.type, (Float, Numeric))
+        else column
+        for column in table.columns
+    ]
+    return select(*columns)
+
+
 def sample_rows(
     conn: Connection, table: Table, limit: int, timeout_seconds: int = 0
 ) -> list[dict[str, Any]]:
     order_columns = _order_columns(conn, table)
-    statement = select(table).order_by(*order_columns).limit(limit)
+    statement = _sample_select(conn, table).order_by(*order_columns).limit(limit)
     return rows_for_statement(conn, table, statement, timeout_seconds)
 
 
@@ -509,7 +546,9 @@ def latest_rows(
 ) -> list[dict[str, Any]]:
     order_columns = _order_columns(conn, table)
     statement = (
-        select(table).order_by(*(desc(column) for column in order_columns)).limit(limit)
+        _sample_select(conn, table)
+        .order_by(*(desc(column) for column in order_columns))
+        .limit(limit)
     )
     return rows_for_statement(conn, table, statement, timeout_seconds)
 
@@ -549,7 +588,9 @@ def random_rows(
     random_function = (
         func.rand() if conn.dialect.name in {"mysql", "mariadb"} else func.random()
     )
-    statement = select(table).order_by(random_function).limit(limit)
+    statement = (
+        _sample_select(conn, table).order_by(random_function).limit(limit)
+    )
     return rows_for_statement(conn, table, statement, timeout_seconds)
 
 

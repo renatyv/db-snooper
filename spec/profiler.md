@@ -54,6 +54,12 @@ The `columns:` block carries the flattened, normalized table shape — one line 
 
 So `id(bigserial,PK)`, `email(varchar255,UNIQ,NOTNULL)`, `user_id(bigint,FK)`.
 
+**Type tokens come from the declared type — unless the data contradicts it (SQLite).** SQLite's declared types are affinity hints, not constraints. Profiling reads the actual per-value storage classes via `typeof(col)` and overrides the token when the declaration is missing or wrong:
+
+- A column declared with no type at all renders its storage class: `x(int)`, or `x(int|text)` when mixed — never a confusing `null` token.
+- A declared type that shares no storage class with the stored data renders `declared→stored`: `qty(numeric→text)` — the case where numeric comparisons quietly become lexicographic. Storage classes map to the usual tokens: `integer`→`int`, `real`→`float`, `text`→`text`, `blob`→`bytes`.
+- Numeric profiling (min/max, average, median) is skipped for a numeric-declared column whose storage is not purely numeric; the histogram carries the values instead.
+
 **`indexes:`** lists each index as a parenthesized column list. Multi-column indexes keep their column order: `(instance_uuid,volume_id)`. Partial/conditional indexes append the predicate: `(batch_id,box_id) WHERE box_id > 12`. The primary-key index is not repeated here. `none` when there are no non-PK indexes.
 
 **`fk:`** lists each foreign key as `col→ref_table.ref_col`. Multi-column FKs use `(col1,col2)→ref_table.(ref1,ref2)`. `none` when there are none.
@@ -82,6 +88,20 @@ Because the type token sits on the same line, numeric ranges omit the historical
    - `message(varchar512): 2751 distinct  ← dropped from samples (per-row diagnostic)`
    - `json_data(text): 9437 distinct  ← dropped from samples (blob, per-row)`
 
+**Content shape for string columns.** A declared `text`/`varchar` token says nothing about what the strings contain — and CSV-imported databases (SQLite especially) park numbers, dates, and booleans in text columns. For a string column whose line does not already show its values (high-cardinality, no histogram), classify a bounded sample (≤1000 values) of its non-null values and prepend the first matching label:
+
+- `bool-like` — every value is `t`/`f`/`true`/`false`/`y`/`n`/`yes`/`no`/`0`/`1`.
+- `uuid` — standard 8-4-4-4-12 hex form.
+- `iso-date` — ISO 8601 date or datetime (`2019-09-10`, `2020-01-31T08:30:00`).
+- `digits` — ASCII digit strings only. Compare them as strings: leading zeros survive and `ORDER BY`/`>` run lexicographically.
+- `numeric` — otherwise int/float-parseable (`-1.5`, `2e5`).
+
+Every non-null value must match; mixed columns and columns with an inlined histogram (whose quoted values already show the content) get no label. Examples:
+
+- `County Code(text): digits, 58 distinct`
+- `CDSCode(text,PK,FK): digits, unique identifier`
+- `event_date(text): iso-date, 41 distinct`
+
 **Metric computation rules** (same thresholds as before, retained verbatim — only the rendering changed):
 
 - `NULL` / non-`NULL` counts. If n_rows > 5M, compute only if the column is indexed.
@@ -91,6 +111,7 @@ Because the type token sits on the same line, numeric ranges omit the historical
 - Distinct count. n_rows ≤ 100K: exact `COUNT(DISTINCT col)`. 100K < n_rows ≤ 1M: exact, only if indexed. n_rows > 1M: don't run.
 - Top-10 most frequent values with counts. n_rows ≤ 100K and indexed → exact. 100K < n_rows and indexed → read `most_common_vals`/`most_common_freqs` from `pg_stats`, MySQL `COLUMN_STATISTICS` histogram buckets, or MariaDB `mysql.column_stats` (`JSON_HB` singletons), if present. n_rows > 100K and unindexed, or no catalog stats available → skip.
 - **Catalog fallback.** When an exact null/non-null count, min/max, or distinct count is skipped because a column is unindexed and the table exceeds the row-count thresholds, fall back to the same catalog statistics and emit a labeled estimate: `nulls≈`, `non_nulls≈`, `min≈`, `max≈`, `distinct≈`. Available on PostgreSQL, MySQL, and MariaDB.
+- **SQLite storage-class audit.** Per column, `SELECT typeof(col), count(*) … GROUP BY 1` when n_rows ≤ 5M (same gate as the null/non-null counts), feeding the type-token overrides above.
 
 **Sensitive fields.** Never dump values for sensitive fields. Treat column names containing `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token` as sensitive: redact sampled rows and value profiles (emit the column's `columns:` line with `redacted` as the profile text).
 

@@ -258,9 +258,18 @@ def _profile_one_table(
         )
         # Column tokens come from introspection on the reflected table and are
         # merged with the profiles into the ``columns:`` block at emit time.
-        # Views/materialized views also render their CREATE VIEW DDL (via
-        # raw_ddl) ahead of that block; their indexes/fk lines stay suppressed.
-        table_profile.column_tokens = format_column_tokens(table, conn)
+        # Data-derived type overrides from the profiles (SQLite storage-class
+        # corrections) replace the declared token. Views/materialized views
+        # also render their CREATE VIEW DDL (via raw_ddl) ahead of that block;
+        # their indexes/fk lines stay suppressed.
+        type_overrides = {
+            profile.name: profile.type_override
+            for profile in table_profile.column_profiles
+            if profile.type_override
+        }
+        table_profile.column_tokens = format_column_tokens(
+            table, conn, type_overrides or None
+        )
         if raw_ddl is None:
             table_profile.indexes_line = format_indexes_line(table, conn)
             table_profile.fk_line = format_fk_line(table)

@@ -14,6 +14,12 @@ class ColumnProfile:
     ``← dropped from samples`` annotation all live on this single string.
     Continuation/indented child lines are intentionally avoided: the spec
     requires one line per column.
+
+    ``type_override`` replaces the declared type inside the ``name(type[,flags])``
+    token when the declared type is missing or provably wrong: SQLite columns
+    declared without a type (NullType) resolve to their actual storage class,
+    and declared↔stored mismatches render as ``declared→stored`` (e.g.
+    ``numeric→text``). ``None`` keeps the declared type token.
     """
 
     name: str
@@ -21,6 +27,7 @@ class ColumnProfile:
     is_sensitive: bool
     is_unique_identifier: bool
     dropped_from_samples: bool
+    type_override: str | None = None
 
 
 __all__ = ["ColumnProfile", "ProfileOptions", "ProfileProgress"]
