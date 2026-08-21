@@ -12,7 +12,7 @@ The profile is written in a **compact one-block-per-table** format (see [Output 
 
 For each table:
 1. Skip empty tables. A table with zero rows carries no data context, so it is excluded from the profile by default. The skipped names are listed once in a trailing summary bullet, e.g. `- Skipped 2 empty table(s): "foo", "bar"`. `ProfileOptions(include_empty_tables=True)` forces their inclusion; an included empty table emits only the bare per-column type tokens in the `columns:` block (and an empty `all rows` marker), with no profile text or `samples:` block (there is nothing to profile).
-2. Emit the schema header: the merged `columns:` block plus the `indexes:` and `fk:` lines, derived from introspection. See [Schema header](#schema-header).
+2. Emit the schema header: the merged `columns:` block plus the `indexes:` line, derived from introspection. Foreign keys are not part of the per-table block; they live only in the top-level `Relationships` section. See [Schema header](#schema-header).
 3. Generate a data profile. See [Per-column profiles](#per-column-profiles) and [Row samples](#row-samples).
    - Use query timeouts to prevent hanging queries. If a query runs for 10s or more → abort the query and skip this metric.
    - Use internal database stats to estimate number of rows. If it's hundreds of millions or more → use the internal stats to generate the profile, don't run any queries. Instead, summarize each column from the engine's catalog statistics (PostgreSQL `pg_stats`, MySQL `COLUMN_STATISTICS` histograms, MariaDB `mysql.column_stats`): approximate null fraction, distinct count, numeric min/max, and top values. Mark these estimates with `≈` and a `(from db stats)` tag so they are distinguishable from exact metrics.
@@ -30,7 +30,6 @@ columns:
 "<col>" <type>[ flags]: <inline profile>
 ...
 indexes: ("<cols>")[, ("<cols>") [WHERE <cond>]] | none
-fk: "<col>"→"<ref_table>"."<ref_col>"[, ...] | none
 
 samples:
 | column | latest | sample | sample |
@@ -44,13 +43,13 @@ The block layout is intentionally fixed: a reader (human or LLM) finds everythin
 
 ### Schema header
 
-The `columns:` block carries the flattened, normalized table shape — one line per column, in table order, as `"<name>" <type>[ flags]: <inline profile>`. The name is **always rendered as a delimited identifier** (`"Enrollment (K-12)"`): the delimiter marks where the name ends (names may contain spaces, commas, or parentheses) and shows the exact quoting to use when referencing the column in SQL — double quotes on PostgreSQL/Oracle/SQLite (and any other dialect), backticks on MySQL/MariaDB/BigQuery, square brackets on SQL Server. Table names are delimited the same way everywhere they appear — the block header `# "frpm"`, the `fk:` target, and the `Relationships` bullets — so every identifier in the profile reads as the exact reference to use in SQL. The token before the colon replaces the `CREATE TABLE` DDL by default; the text after the colon is the column's data profile (see [Per-column profiles](#per-column-profiles)). When there is no profile text (e.g. an included empty table), the line is just the bare token `"<name>" <type>[ flags]`.
+The `columns:` block carries the flattened, normalized table shape — one line per column, in table order, as `"<name>" <type>[ flags]: <inline profile>`. The name is **always rendered as a delimited identifier** (`"Enrollment (K-12)"`): the delimiter marks where the name ends (names may contain spaces, commas, or parentheses) and shows the exact quoting to use when referencing the column in SQL — double quotes on PostgreSQL/Oracle/SQLite (and any other dialect), backticks on MySQL/MariaDB/BigQuery, square brackets on SQL Server. Table names are delimited the same way everywhere they appear — the block header `# "frpm"` and the `Relationships` bullets — so every identifier in the profile reads as the exact reference to use in SQL. The token before the colon replaces the `CREATE TABLE` DDL by default; the text after the colon is the column's data profile (see [Per-column profiles](#per-column-profiles)). When there is no profile text (an included empty table, or a small table whose every row is dumped below), the line is just the bare token `"<name>" <type>[ flags]`.
 
 **Column flags (space-separated, after the type).** Emit only what applies:
 - `PK` — column is (part of) the primary key.
 - `UNIQ` — column has a single-column `UNIQUE` constraint.
 - `NOTNULL` — column is `NOT NULL` and not already `PK` (PK implies NOT NULL, so don't repeat it).
-- `FK` — column has a single-column foreign key (the target is listed in the `fk:` line).
+- `FK` — column has a single-column foreign key (the target is listed in the `Relationships` section).
 
 So `"id" bigserial PK`, `"email" varchar255 UNIQ NOTNULL`, `"user_id" bigint FK`.
 
@@ -62,10 +61,10 @@ So `"id" bigserial PK`, `"email" varchar255 UNIQ NOTNULL`, `"user_id" bigint FK`
 
 **`indexes:`** lists each index as a parenthesized column list, names delimited like in `columns:`. Multi-column indexes keep their column order: `("instance_uuid","volume_id")`. Partial/conditional indexes append the predicate: `("batch_id","box_id") WHERE box_id > 12`. The primary-key index is not repeated here. `none` when there are no non-PK indexes.
 
-**`fk:`** lists each foreign key as `"col"→"ref_table"."ref_col"`. Multi-column FKs use `("col1","col2")→"ref_table".("ref1","ref2")`. `none` when there are none.
+**Foreign keys are not rendered per table.** The top-level `Relationships` section (one `- "parent"."col" ← "child"."col"` bullet per referenced column, grouped by parent) is the single place FK structure appears; the per-table `FK` flag on a column token points there.
 
 **When introspection fails or yields nothing usable**, fall back in this order:
-1. Parse the raw `CREATE TABLE` DDL emitted by mysqldump or pg_dump with a SQL parser (e.g. `sqlglot`) and derive the `columns:`/`indexes:`/`fk:` lines from the parse tree.
+1. Parse the raw `CREATE TABLE` DDL emitted by mysqldump or pg_dump with a SQL parser (e.g. `sqlglot`) and derive the `columns:`/`indexes:` lines from the parse tree.
 2. If parsing also fails, emit the raw `CREATE TABLE` DDL in a fenced `sql` block in place of the header, and continue with `samples:` as usual (there is no `columns:` block — column profiling is skipped on this path).
 
 The full DDL is **only** ever emitted as this last-resort fallback. In the normal path, introspection produces the one-liner directly.
@@ -127,23 +126,20 @@ Values are rendered as the underlying SQL would print them: timestamps in ISO 86
 
 ### Small tables
 
-A table with fewer than 10 rows uses `all rows:` instead of `samples:`. The block is otherwise identical:
+A table with fewer than 10 rows uses `all rows:` instead of `samples:`, and the `columns:` block carries only the bare `"name" <type>[ flags]` tokens — the profile text is omitted, since the dumped rows already expose every value (histograms, ranges, and null counts would restate them):
 
 ```
 # "<table>"  (rows=<N>)
 
 columns:
-"<col>" <type>[ flags]: <inline profile>
+"<col>" <type>[ flags]
 ...
 indexes: ...
-fk: ...
 
 all rows:
 | column | row 1 | row 2 | ... | row N |
 | <col> | <v> | <v> | ... | <v> |
 ```
-
-The profile text in the `columns:` block is still emitted for small tables when any column has a useful profile (null fractions, a small histogram, etc.). When the table is so small that `all rows:` already exposes every value, a column's profile may simply read `<v>=N, <v>=M` (which is the histogram) — this is fine and not considered redundant, since the two blocks serve different readers.
 
 ## Reliability
 
@@ -181,7 +177,6 @@ columns:
 "box_id" bigint PK FK: 175 distinct, 17000038..32005989
 
 indexes: ("box_id")
-fk: "batch_id"→"batch"."id", "box_id"→"box"."id"
 
 samples:
 | column | latest | sample | sample |
@@ -191,12 +186,11 @@ samples:
 # "batch_port"  (rows=7)
 
 columns:
-"id" int PK: 5, 6, 7, 8, 9, 10, 11
-"batch_id" bigint FK: 12=2, 15, 16, 17, 20=2
-"port_short_id" int FK: 1=3, 2=4
+"id" int PK
+"batch_id" bigint FK
+"port_short_id" int FK
 
 indexes: none
-fk: "batch_id"→"batch"."id", "port_short_id"→"port"."short_id"
 
 all rows:
 | column | row 1 | row 2 | row 3 | row 4 | row 5 | row 6 | row 7 |
@@ -222,7 +216,6 @@ columns:
 "json_data" text: 9437 distinct  ← dropped from samples (blob, per-row)
 
 indexes: ("time")
-fk: none
 
 samples:
 | column | latest | sample | sample |

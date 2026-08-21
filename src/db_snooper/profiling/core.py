@@ -17,7 +17,6 @@ from db_snooper.contracts import (
 from db_snooper.profiling.ddl import TableDdl, get_table_ddl
 from db_snooper.profiling.schema_header import (
     format_column_tokens,
-    format_fk_line,
     format_indexes_line,
 )
 from db_snooper.profiling.tables import (
@@ -199,7 +198,8 @@ def _profile_one_table(
     """Profile a single table, returning (TableProfile, raw_ddl, fallback_note).
 
     Introspection produces the merged ``columns:`` tokens plus the
-    ``indexes:``/``fk:`` lines by default. The full ``CREATE TABLE`` DDL is
+    ``indexes:`` line by default (foreign keys live only in the consolidated
+    ``Relationships`` section). The full ``CREATE TABLE`` DDL is
     only ever emitted as a last-resort fallback when introspection fails
     entirely; in that case ``raw_ddl`` carries the DDL block (rendered as
     fenced ``sql``) and the header fields in the ``TableProfile`` are left
@@ -271,7 +271,7 @@ def _profile_one_table(
         # Data-derived type overrides from the profiles (SQLite storage-class
         # corrections) replace the declared token. Views/materialized views
         # also render their CREATE VIEW DDL (via raw_ddl) ahead of that block;
-        # their indexes/fk lines stay suppressed.
+        # their ``indexes:`` line stays suppressed.
         type_overrides = {
             profile.name: profile.type_override
             for profile in table_profile.column_profiles
@@ -282,7 +282,6 @@ def _profile_one_table(
         )
         if raw_ddl is None:
             table_profile.indexes_line = format_indexes_line(table, conn)
-            table_profile.fk_line = format_fk_line(table, conn.dialect.name)
     else:
         # Introspection unavailable; only the raw DDL block remains.
         table_profile = TableProfile(
@@ -310,13 +309,14 @@ def _emit_table_block(
         columns:
         "<col>" <type>[ flags]: <inline profile>
         indexes: ...
-        fk: ...
         samples: / all rows:
         | column | ... |
 
-    Views render their CREATE VIEW DDL in a fenced ``sql`` block in place of
-    the ``indexes:``/``fk:`` lines; the utility-DDL fallback (reflection
-    failed) has no column tokens, so its block is DDL + note only.
+    When ``all rows:`` is printed every value is already visible, so the
+    ``columns:`` block carries bare tokens with no profile text. Views render
+    their CREATE VIEW DDL in a fenced ``sql`` block in place of the
+    ``indexes:`` line; the utility-DDL fallback (reflection failed) has no
+    column tokens, so its block is DDL + note only.
     """
     row_display = table_profile.row_count_display
     if not row_display and size_info is not None:
@@ -342,17 +342,19 @@ def _emit_table_block(
 
     # columns: block — the merged schema + per-column profile. Each column is
     # one ``"name" type[ flags]: profile`` line. Included empty tables carry no
-    # data context, so they emit bare tokens with no profile text; columns the
-    # stats path skipped render as bare tokens too.
+    # data context, and small tables dump every value via ``all rows:`` — both
+    # emit bare tokens with no profile text, which would only restate the
+    # visible rows; columns the stats path skipped render as bare tokens too.
     is_empty_included = (
         size_info is not None
         and size_info.is_empty
         and options.include_empty_tables
     )
+    bare_tokens = is_empty_included or table_profile.is_small_table_all_rows
     if table_profile.column_tokens:
         profiles_by_name = (
             {}
-            if is_empty_included
+            if bare_tokens
             else {
                 profile.name: profile.value_line
                 for profile in table_profile.column_profiles
@@ -365,12 +367,8 @@ def _emit_table_block(
         lines.append("")
 
     if raw_ddl is None:
-        for line in (
-            table_profile.indexes_line,
-            table_profile.fk_line,
-        ):
-            if line:
-                lines.append(line)
+        if table_profile.indexes_line:
+            lines.append(table_profile.indexes_line)
         lines.append("")
 
     # samples: / all rows: block.

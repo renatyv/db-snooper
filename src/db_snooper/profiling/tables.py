@@ -49,7 +49,7 @@ class TableProfile:
 
     The normal path fills ``column_tokens`` (``(name, '"name" type[ flags]')``
     pairs merged with ``column_profiles`` into the ``columns:`` block) plus
-    ``indexes_line``/``fk_line``. When introspection fully fails, ``raw_ddl``
+    ``indexes_line``. When introspection fully fails, ``raw_ddl``
     holds the last-resort CREATE TABLE block (rendered as a fenced ``sql``
     block), the header fields are ``None``, and column profiling is skipped.
     ``sample_*`` fields drive ``samples:``/``all rows:``.
@@ -57,7 +57,6 @@ class TableProfile:
 
     column_tokens: list[tuple[str, str]] | None = None
     indexes_line: str | None = None
-    fk_line: str | None = None
     raw_ddl: list[str] | None = None
     fallback_note: str | None = None
     column_profiles: list[ColumnProfile] = field(default_factory=list)
@@ -429,8 +428,9 @@ def profile_table(
         column_profiles = _profile_all_columns(
             conn, table, options, int(total_rows), report_column
         )
-        # Small tables (<10 rows) emit both the columns: profiles and all
-        # rows: per spec.
+        # Small tables (<10 rows) dump every row; at emit time their
+        # ``columns:`` block renders bare tokens, so the profiles computed
+        # here only drive sample-column selection (sensitive/dropped flags).
         sample_columns = select_sample_columns(column_profiles)
         return TableProfile(
             column_profiles=column_profiles,

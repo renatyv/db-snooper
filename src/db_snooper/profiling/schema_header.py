@@ -11,9 +11,11 @@ from db_snooper.shared import quote_ident
 
 # The one-block-per-table format flattens a table's shape into a merged
 # ``columns:`` block (one ``"name" type[ flags]`` line per column, see
-# core.py) plus the ``indexes:``/``fk:`` one-liners, all derived from SQLAlchemy
-# introspection. These helpers replace the historical ``CREATE TABLE`` DDL block
-# in the normal path; DDL survives only as a last-resort fallback (see core.py).
+# core.py) plus the ``indexes:`` one-liner, all derived from SQLAlchemy
+# introspection. Foreign keys are not rendered per table; they live only in the
+# consolidated ``Relationships`` section (see tables.py). These helpers replace
+# the historical ``CREATE TABLE`` DDL block in the normal path; DDL survives
+# only as a last-resort fallback (see core.py).
 
 
 def format_column_tokens(
@@ -87,34 +89,6 @@ def format_indexes_line(table: Table, conn: Connection) -> str:
     if not entries:
         return "indexes: none"
     return "indexes: " + ", ".join(entries)
-
-
-def format_fk_line(table: Table, dialect_name: str) -> str:
-    """Render foreign keys as ``"col"→"ref_table"."ref_col"``.
-
-    Composite FKs render as ``("c1","c2")→"ref_table".("r1","r2")``. ``none``
-    when the table has no foreign keys.
-    """
-    entries: list[str] = []
-    for constraint in table.constraints:
-        if not isinstance(constraint, ForeignKeyConstraint):
-            continue
-        elements = list(constraint.elements)
-        if not elements:
-            continue
-        local = [element.parent.name for element in elements]
-        ref_cols = []
-        ref_table = ""
-        for element in elements:
-            ref_table = element.column.table.name
-            ref_cols.append(element.column.name)
-        local_side = _join_columns(local, dialect_name)
-        ref_side = _join_columns(ref_cols, dialect_name)
-        quoted_table = quote_ident(ref_table, dialect_name)
-        entries.append(f"{local_side}→{quoted_table}.{ref_side}")
-    if not entries:
-        return "fk: none"
-    return "fk: " + ", ".join(entries)
 
 
 def _join_columns(cols: list[str], dialect_name: str) -> str:
