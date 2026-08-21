@@ -2,9 +2,20 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from random import randint
 from typing import Any
 
-from sqlalchemy import Float, Numeric, Table, desc, func, select, text
+from sqlalchemy import (
+    Column,
+    Float,
+    Integer,
+    Numeric,
+    Table,
+    desc,
+    func,
+    select,
+    text,
+)
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql.elements import Label
@@ -26,6 +37,7 @@ from db_snooper.profiling.columns import (
     json_dumps,
     jsonable,
     profile_column,
+    truncate_text,
 )
 from db_snooper.profiling.models import ColumnProfile
 from db_snooper.shared import is_sensitive, quote_ident
@@ -314,8 +326,9 @@ def _format_cell(value: Any) -> str:
     """Render a sampled value as a markdown-table cell.
 
     ``None`` becomes ``null``; booleans become lowercase ``true``/``false``;
-    containers use compact JSON. Pipes are escaped and newlines collapsed so a
-    value can never break the surrounding table row.
+    containers use compact JSON. Values are capped (with ``…``) so a long
+    string or JSON blob cannot stretch the table. Pipes are escaped and
+    newlines collapsed so a value can never break the surrounding table row.
     """
     if value is None:
         return "null"
@@ -328,7 +341,7 @@ def _format_cell(value: Any) -> str:
             text_value = str(value)
     else:
         text_value = format_value(value)
-    return str(text_value).replace("|", "\\|").replace("\n", " ")
+    return truncate_text(str(text_value)).replace("|", "\\|").replace("\n", " ")
 
 
 def _format_rows_table(
@@ -442,9 +455,7 @@ def profile_table(
         row_skips.append(("latest rows", "unreadable values"))
     random_sample: list[dict[str, Any]] = []
     dialect = conn.dialect.name
-    if dialect in {"mysql", "mariadb"}:
-        row_skips.append(("random rows", "disabled to avoid ORDER BY RAND()"))
-    elif dialect in {"bigquery", "postgresql"} and not allow_table_sample:
+    if dialect in {"mysql", "mariadb", "bigquery", "postgresql"} and not allow_table_sample:
         row_skips.append(
             ("random rows", "native table sampling is unavailable for views")
         )
@@ -461,6 +472,7 @@ def profile_table(
                     options.random_row_limit,
                     options.query_timeout,
                     options.random_sample_percent,
+                    total_rows,
                 )
         except (TypeError, ValueError):
             random_sample = []
@@ -580,6 +592,7 @@ def random_rows(
     limit: int,
     timeout_seconds: int = 0,
     sample_percent: float = 0.1,
+    total_rows: int = 0,
 ) -> list[dict[str, Any]]:
     if conn.dialect.name == "bigquery":
         qualified = conn.dialect.identifier_preparer.format_table(table)
@@ -594,13 +607,71 @@ def random_rows(
             *(sampled.c[column.name].label(column.name) for column in table.columns)
         ).limit(limit)
         return rows_for_statement(conn, table, statement, timeout_seconds)
-    random_function = (
-        func.rand() if conn.dialect.name in {"mysql", "mariadb"} else func.random()
-    )
-    statement = (
-        _sample_select(conn, table).order_by(random_function).limit(limit)
-    )
+    if conn.dialect.name in {"mysql", "mariadb"}:
+        return _mysql_random_rows(conn, table, limit, timeout_seconds, total_rows)
+    statement = _sample_select(conn, table).order_by(func.random()).limit(limit)
     return rows_for_statement(conn, table, statement, timeout_seconds)
+
+
+# Below this size an ORDER BY RAND() filesort is cheap; above it, keyless
+# tables stream through a RAND() filter instead of sorting.
+_MYSQL_SORT_ROW_LIMIT = 10_000
+# Keep-rate multiplier for the filter: rows arrive with probability p, so a
+# p of safety*limit/total_rows expects to fill the limit after ~total/safety
+# rows read and to over-deliver by the safety factor.
+_MYSQL_FILTER_SAFETY = 10.0
+
+
+def _mysql_random_rows(
+    conn: Connection,
+    table: Table,
+    limit: int,
+    timeout_seconds: int,
+    total_rows: int,
+) -> list[dict[str, Any]]:
+    """Random rows on MySQL/MariaDB, which have no TABLESAMPLE clause.
+
+    With a numeric single-column primary key, read MIN/MAX (two index dives)
+    and seek to a random key value in between — the optimizer cannot shortcut
+    an SQL-side ``FLOOR(MIN(pk) + (MAX(pk) - MIN(pk)) * RAND())`` to index
+    dives, so the threshold is drawn here. Spans [MIN, MAX] so keys that
+    don't start near 0 (shard offsets, snowflake ids) don't collapse onto
+    the table head; rows after id gaps are somewhat more likely to be
+    picked, which sample rows tolerate.
+
+    Without such a key, stream rows through a RAND() filter that stops after
+    ``limit`` matches (biased toward the storage-order prefix; the statement
+    timeout bounds the scan), and only sort the whole table with
+    ``ORDER BY RAND`` when it is small enough for that to be trivial.
+    """
+    key = _random_seek_key(table)
+    if key is not None:
+        bounds = query_timeout.execute(
+            conn, select(func.min(key), func.max(key)), timeout_seconds
+        ).one_or_none()
+        if bounds is not None and bounds[0] is not None:
+            threshold = randint(int(bounds[0]), int(bounds[1]))
+            statement = (
+                _sample_select(conn, table)
+                .where(key >= threshold)
+                .order_by(key)
+                .limit(limit)
+            )
+            return rows_for_statement(conn, table, statement, timeout_seconds)
+    elif total_rows > _MYSQL_SORT_ROW_LIMIT:
+        fraction = min(1.0, _MYSQL_FILTER_SAFETY * limit / total_rows)
+        statement = _sample_select(conn, table).where(func.rand() < fraction).limit(limit)
+        return rows_for_statement(conn, table, statement, timeout_seconds)
+    statement = _sample_select(conn, table).order_by(func.rand()).limit(limit)
+    return rows_for_statement(conn, table, statement, timeout_seconds)
+
+
+def _random_seek_key(table: Table) -> Column | None:
+    """The single integer primary-key column a random seek can index, if any."""
+    columns = list(table.primary_key.columns)
+    if len(columns) == 1 and isinstance(columns[0].type, Integer):
+        return columns[0]
+    return None
 
 
 def rows_for_statement(
@@ -620,8 +691,9 @@ def rows_for_statement(
 
 
 def bounded_value(value: Any) -> Any:
-    """JSON-encode and cap oversized container values so sampled-row output
-    cannot be dominated by a single huge JSON/ARRAY value."""
+    """Cap oversized container values (per spec: truncated with a trailing
+    ``…``) so sampled-row output cannot be dominated by a single huge
+    JSON/ARRAY value."""
     encoded = jsonable(value)
     if isinstance(encoded, (dict, list)):
         try:
@@ -629,5 +701,5 @@ def bounded_value(value: Any) -> Any:
         except (TypeError, ValueError):
             return encoded
         if len(serialized) > JSON_MAX_VALUE_BYTES:
-            return f"[LARGE_JSON:{len(serialized)}]"
+            return truncate_text(serialized)
     return encoded

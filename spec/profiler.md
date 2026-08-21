@@ -83,7 +83,7 @@ Because the type token sits on the same line, numeric ranges omit the historical
    - `"delete_on_termination" bool: 0=11986, 1=4812`
 4. **High-cardinality numeric column.** Emit `N distinct` (or `all distinct` when every present value is unique but the column is not an identifier), then the numeric range `min..max`, then `avg=…` and `median=…` when computed, then `nulls=N` when non-zero, all comma-separated on the same line. Example:
    - `"tick" bigint: 4079 distinct, 1..12592, avg=1944.8, median=1160`
-5. **High-cardinality non-numeric column** (strings, timestamps, etc.). Emit `N distinct` (or `all distinct`) plus optional top-10 values when informative, plus `nulls=N`. For free-text / blob / JSON columns that are per-row diagnostics, add a trailing `← dropped from samples` annotation so a reader knows why the column is absent from `samples:`. Examples:
+5. **High-cardinality non-numeric column** (strings, timestamps, etc.). Emit `N distinct` (or `all distinct`) plus top-10 values when the distribution is **skewed** — the top value's count is at least 2× the uniform baseline (non-null rows / distinct). A near-uniform column shows only `N distinct`: a value list where every count is ~equal is noise, not a distribution. Plus `nulls=N`. For free-text / blob / JSON columns that are per-row diagnostics, add a trailing `← dropped from samples` annotation so a reader knows why the column is absent from `samples:`. Examples:
    - `"command_id" varchar30: "RECOVER"=6125, "MOVE"=1462, "IDLE"=446, ...`
    - `"message" varchar512: 2751 distinct  ← dropped from samples (per-row diagnostic)`
    - `"json_data" text: 9437 distinct  ← dropped from samples (blob, per-row)`
@@ -106,7 +106,7 @@ Every non-null value must match; mixed columns and columns with an inlined histo
 
 - `NULL` / non-`NULL` counts. If n_rows > 5M, compute only if the column is indexed.
 - Min, max for numeric columns. If n_rows > 5M, compute only if indexed.
-- Average for numeric columns. If 1M < n_rows ≤ 10M, compute only if indexed. If n_rows > 10M, skip. **Skip entirely when a full histogram is available** (the low-cardinality case above): the counts already state the precise distribution, so an average would only restate it.
+- Average for numeric columns. If 1M < n_rows ≤ 10M, compute only if indexed. If n_rows > 10M, skip. **Skip entirely when a full histogram is available** (the low-cardinality case above): the counts already state the precise distribution, so an average would only restate it. Also skip on key-like columns (`id`, `*_id`, `*_CODE`, `*_KEY`, `uuid`): a mean over arbitrary codes says nothing.
 - Median for numeric columns if n_rows < 100,000. Use native `PERCENTILE_CONT` for PostgreSQL & MariaDB; MySQL needs `ROW_NUMBER()`/`NTILE()` over a full sort. **Skip entirely when a full histogram is available**, for the same reason as the average.
 - Distinct count. n_rows ≤ 100K: exact `COUNT(DISTINCT col)`. 100K < n_rows ≤ 1M: exact, only if indexed. n_rows > 1M: don't run.
 - Top-10 most frequent values with counts. n_rows ≤ 100K and indexed → exact. 100K < n_rows and indexed → read `most_common_vals`/`most_common_freqs` from `pg_stats`, MySQL `COLUMN_STATISTICS` histogram buckets, or MariaDB `mysql.column_stats` (`JSON_HB` singletons), if present. n_rows > 100K and unindexed, or no catalog stats available → skip.
@@ -123,7 +123,7 @@ Only columns whose concrete values add information beyond the `values:` block ap
 
 Keep numeric ranges, identifiers, timestamps, foreign-key columns, and any column whose `columns:` line is merely `N distinct` without a histogram — those benefit from seeing actual values. The header lists every kept column in the same order as the `columns:` block.
 
-Values are rendered as the underlying SQL would print them: timestamps in ISO 8601 with offset, numbers bare, strings bare (no quotes in the samples table), `null` for NULL. Oversized container values (long JSON, large strings) are truncated with a trailing `…`.
+Values are rendered as the underlying SQL would print them: timestamps in ISO 8601 with offset, numbers bare, strings bare (no quotes in the samples table), `null` for NULL. Oversized values (long JSON containers, large strings) are capped at ~200 characters with a trailing `…` — in the samples table and in inline histogram values alike.
 
 ### Small tables
 
@@ -152,6 +152,7 @@ The profile text in the `columns:` block is still emitted for small tables when 
 - When profiling JSON/JSONB, provide reasonable gates so that requests don't hang if the JSON data stored is too large or if there are too many of them.
 - Migration frameworks for Java, Python, Ruby on Rails, and PHP almost always have standard table names. Use these names and don't profile these tables. Also skip other technical tables used in web frameworks in Java, Python, Ruby, TypeScript, PHP, ...
 - PostgreSQL supports fast sampling with `SELECT avg(col), stddev(col) FROM mytable TABLESAMPLE SYSTEM (1);`. Some other databases too. Use it when there are too many rows for appropriate metrics.
+- MySQL and MariaDB have no `TABLESAMPLE`; `ORDER BY RAND()` materializes and sorts the whole table, so reserve it for small tables. The random sample rows come from a random primary-key seek — read `MIN(pk)`/`MAX(pk)` (index dives; an SQL-side `FLOOR(MIN(pk) + (MAX(pk)-MIN(pk)) * RAND())` cannot use them, it scans an index), pick a random threshold in between, and range-scan `WHERE pk >= threshold LIMIT n` — or, on tables without a numeric single-column key, from a streaming `WHERE RAND() < p LIMIT n` filter sized from the row count.
 
 ## Result example
 

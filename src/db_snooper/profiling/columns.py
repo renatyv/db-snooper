@@ -40,6 +40,20 @@ JSON_MAX_VALUE_BYTES = 65_536  # skip individual JSON values larger than 64KB
 SHAPE_SAMPLE_LIMIT = 1_000  # max values read for content-shape classification
 SHAPE_ROW_LIMIT = 5_000_000  # don't classify above this row count
 
+# Rendered values are capped so a single huge string or JSON blob cannot
+# dominate a profile line or a samples cell.
+VALUE_TEXT_LIMIT = 200
+
+# Top-k value lists describe a distribution only when it is skewed: the top
+# value must beat the uniform baseline (rows/distinct) by this factor.
+# Near-uniform columns render just "N distinct".
+TOP_K_SKEW_FACTOR = 2
+
+# Key-like column-name tokens: surrogate and natural keys (dw's TERM_CODE /
+# X_KEY naming) whose average/median would only restate arbitrary codes.
+_KEYLIKE_TOKENS = frozenset({"id", "code", "key", "uuid"})
+_NAME_TOKEN_RE = re.compile(r"[^0-9A-Za-z]+")
+
 _BOOL_LIKE_VALUES = frozenset(
     {"t", "f", "true", "false", "y", "n", "yes", "no", "0", "1"}
 )
@@ -222,8 +236,7 @@ def profile_column(
             )
         col_name = str(column.name)
         include_avg_median = (
-            col_name != "id"
-            and not col_name.endswith("_id")
+            not is_keylike_name(col_name)
             # The histogram already describes the distribution, so average/median
             # would only restate it.
             and full_histogram is None
@@ -291,20 +304,28 @@ def profile_column(
     summary.extend(numeric_stats)
 
     # Top values for high-cardinality columns: inline on the same line. The
-    # full-histogram case is already in ``summary`` above.
+    # full-histogram case is already in ``summary`` above. A top-k list only
+    # describes the distribution when it is skewed — when every count sits near
+    # the uniform baseline (rows/distinct), the list is noise and the column
+    # renders just "N distinct".
     top_inline: str | None = None
     if not sensitive and not unique_identifier and distinct_supported:
         if full_histogram is not None:
             # Already inlined above.
             pass
         elif conn.dialect.name == "bigquery" and approximate_top_values:
-            top_inline = f"≈{format_value_counts(approximate_top_values[:10])}"
+            if top_values_skewed(
+                approximate_top_values[0][1], distinct_count, non_nulls, total_rows
+            ):
+                top_inline = f"≈{format_value_counts(approximate_top_values[:10])}"
         elif total_rows <= 100_000 and indexed:
             with query_timeout.metric(skipped, "top values"):
                 top_values = get_value_counts(
                     conn, table, column, limit=10, timeout_seconds=timeout_seconds
                 )
-                if top_values and top_values[0][1] > 1:
+                if top_values and top_values_skewed(
+                    top_values[0][1], distinct_count, non_nulls, total_rows
+                ):
                     top_inline = (
                         "≈" if conn.dialect.name == "bigquery" else ""
                     ) + format_value_counts(top_values)
@@ -312,7 +333,15 @@ def profile_column(
             top_values = (
                 list(catalog_stat.top_values) if catalog_stat is not None else []
             )
-            if top_values:
+            catalog_distinct = (
+                catalog_stat.distinct if catalog_stat is not None else None
+            )
+            if top_values and top_values_skewed(
+                top_values[0][1],
+                distinct_count if distinct_count is not None else catalog_distinct,
+                non_nulls,
+                total_rows,
+            ):
                 top_inline = format_value_counts(top_values)
     if top_inline:
         summary.append(top_inline)
@@ -774,6 +803,34 @@ def is_identifier_name(column_name: str) -> bool:
     return column_name.lower().endswith("id")
 
 
+def is_keylike_name(column_name: str) -> bool:
+    """True for surrogate/natural-key column names (``id``, ``*_id``,
+    ``TERM_CODE``, ``X_KEY``, ``District Code``, ``uuid``) whose average/
+    median would only restate arbitrary codes. The last underscore-, space-,
+    or punctuation-separated token decides, so both conventional and
+    CSV-imported naming match."""
+    tokens = [token for token in _NAME_TOKEN_RE.split(column_name) if token]
+    return bool(tokens) and tokens[-1].lower() in _KEYLIKE_TOKENS
+
+
+def top_values_skewed(
+    top_count: int,
+    distinct_count: int | None,
+    non_nulls: int | None,
+    total_rows: int,
+) -> bool:
+    """Whether a top-k value list is worth rendering: the top value's count
+    must beat the uniform baseline (non-null rows / distinct) by
+    :data:`TOP_K_SKEW_FACTOR`. Returns True when no baseline can be computed
+    (distinct unknown) so the list is kept rather than silently dropped."""
+    if distinct_count is None or distinct_count <= 0:
+        return True
+    base_rows = non_nulls if non_nulls is not None else total_rows
+    if base_rows <= 0:
+        return True
+    return top_count >= TOP_K_SKEW_FACTOR * (base_rows / distinct_count)
+
+
 def format_value_counts(values: list[tuple[Any, int]]) -> str:
     parts = []
     for value, count in values:
@@ -790,14 +847,31 @@ def format_value(value: Any) -> str:
     if value is None:
         return "NULL"
     if isinstance(value, float):
-        return f"{value:g}"
+        return _format_float(value, 6)
     if isinstance(value, Decimal):
         # PostgreSQL NUMERIC aggregates carry full scale (e.g.
         # ``4.0000000000000000``); render through float with 12 significant
         # digits so the inline value line stays compact while preserving enough
         # precision for avg/median.
-        return f"{float(value):.12g}"
-    return str(value)
+        return truncate_text(_format_float(float(value), 12))
+    return truncate_text(str(value))
+
+
+def _format_float(value: float, significant: int) -> str:
+    text = f"{value:.{significant}g}"
+    if "e" in text or "E" in text:
+        # Scientific form carries scale, not precision: ``2.91772e+06`` reads
+        # the same as ``2.9e+06`` at profile distance.
+        return f"{value:.2g}"
+    return text
+
+
+def truncate_text(text: str, limit: int = VALUE_TEXT_LIMIT) -> str:
+    """Cap a rendered value so one huge string or JSON blob cannot dominate a
+    profile line; the trailing ``…`` marks the cut."""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
 
 
 def jsonable(value: Any) -> Any:
