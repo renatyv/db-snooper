@@ -273,7 +273,7 @@ wheels = [
 
 [[package]]
 name = "db-snooper"
-version = "0.0.33"
+version = "0.0.34"
 source = { editable = "." }
 dependencies = [
     { name = "duckdb-engine" },
