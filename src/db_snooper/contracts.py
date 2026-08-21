@@ -29,6 +29,7 @@ class ProfileOptions:
     include_technical_tables: bool = False
     include_empty_tables: bool = False
     use_dump_ddl: bool = False
+    emit_toc: bool = True
 
 
 ProfileProgress = Callable[[int, int, str], None]
@@ -61,6 +62,10 @@ class ProfileDocument:
     schema: str
     table: str | None
     markdown: str
+    # Content of the ``<profile>.toc.md`` sidecar indexing this markdown's
+    # sections (None when TOC emission is disabled or there is nothing to
+    # index). Empty for ``--per-table`` documents: one file, one table block.
+    toc: str | None = None
 
 
 @dataclass(frozen=True)

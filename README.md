@@ -47,6 +47,7 @@ The profile `.md` file contains:
 - Redacted values for sensitive column names containing `password`, `passwd`, `pwd`, `hash`, `salt`, `secret`, or `token` — the column's `columns:` line reads `redacted` and it is excluded from samples.
 - A `skipped_technical_tables` entry in the frontmatter naming migration/framework tables excluded from the profile.
 - Empty tables are skipped by default. A `- Skipped N empty table(s):` bullet names them; the Python API's `ProfileOptions(include_empty_tables=True)` includes them (emitting only the bare per-column type tokens in the `columns:` block, with no profile text or `samples:`).
+- A `<schema>.toc.md` sidecar written next to the profile in the same run, indexing every top-level section — `Relationships`, each table block (`"Match" (rows=25979): lines 50-289`), and the trailing summary bullets — with its exact line range. Its frontmatter pins the profile by `profile_sha256` (plus `generator`, `version`, `generated_at_utc`, and `profile_lines`) so consumers can fail fast on a stale TOC instead of reading shifted line ranges. Emitted by default; `--no-toc` disables it, and `--per-table` profiles get none.
 
 ## Database Examples
 
@@ -159,6 +160,7 @@ Profile options:
 - `--output path`: write profiles to a custom directory.
 - `--metadata-only`: emit schema, relationships, row estimates, and available catalog statistics without scanning table rows.
 - `--per-table`: generate one `.md` profile for each table instead of a single schema profile.
+- `--no-toc`: skip the `<schema>.toc.md` sidecar (emitted by default).
 - `--include-tables table_a,table_b`: only profile selected tables.
 - `--exclude-tables table_c`: skip selected tables.
 - `--query-timeout 10`: skip individual PostgreSQL/MySQL/MariaDB profiling queries that exceed this many seconds; `0` disables the timeout.
@@ -195,6 +197,16 @@ profile_md = profile_database(
     ),
 )
 ```
+
+To also get the `<profile>.toc.md` sidecar content (write it next to the profile file yourself), use the with-TOC variants:
+
+```python
+from db_snooper import generate_profile_with_toc
+
+profile_md, toc_md = generate_profile_with_toc(database_url)
+```
+
+`toc_md` is `None` when `ProfileOptions(emit_toc=False)` is set or the profile has no sections to index. `profile_database_with_toc` offers the same pair for an existing engine.
 
 ## Agent Skill
 

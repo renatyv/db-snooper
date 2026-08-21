@@ -27,6 +27,7 @@ from db_snooper.profiling.tables import (
     profile_table,
     resolve_table_size,
 )
+from db_snooper.profiling.toc import TocTracker, render_toc
 from db_snooper.profiling.utility_dump import dump_create_table
 from db_snooper.query_timeout import BigQueryBudget
 from db_snooper.shared import quote_ident
@@ -38,6 +39,25 @@ def profile_schema(
     progress: ProfileProgress | None = None,
     bigquery_budget: BigQueryBudget | None = None,
 ) -> str:
+    markdown, _ = profile_schema_with_toc(
+        engine, plan, progress, bigquery_budget=bigquery_budget
+    )
+    return markdown
+
+
+def profile_schema_with_toc(
+    engine: Engine,
+    plan: SchemaProfilePlan,
+    progress: ProfileProgress | None = None,
+    bigquery_budget: BigQueryBudget | None = None,
+) -> tuple[str, str | None]:
+    """Profile one schema, returning ``(markdown, toc_markdown | None)``.
+
+    The TOC sidecar indexes every top-level section of the markdown with its
+    exact line range, computed from the writer's own positions while
+    emitting. It is ``None`` when ``emit_toc`` is disabled or the profile has
+    no sections to index.
+    """
     options = plan.options
     tables = list(plan.table_names)
     skipped_technical_tables = plan.skipped_technical_tables
@@ -75,7 +95,8 @@ def profile_schema(
         accessible = set(permission_report.accessible_tables)
         tables = [table for table in tables if table in accessible]
         if not tables:
-            return "\n".join(lines).rstrip() + "\n"
+            return "\n".join(lines).rstrip() + "\n", None
+        toc = TocTracker(lines)
         # Collect foreign-key relationships once (catalog metadata only, no row
         # scans) and emit a consolidated section up front. This survives the
         # one-block-per-table rendering, so join hints stay available regardless
@@ -86,10 +107,12 @@ def profile_schema(
             engine.dialect.name,
         )
         if relationship_lines:
+            toc_start = toc.start()
             lines.append("## Relationships")
             lines.append("")
             lines.extend(relationship_lines)
             lines.append("")
+            toc.finish("Relationships", toc_start)
         metadata = MetaData()
         failed_ddl_tables: list[str] = []
         skipped_empty_tables: list[str] = []
@@ -144,6 +167,7 @@ def profile_schema(
                 failed_ddl_tables.append(table_name)
                 continue
 
+            toc_start = toc.start()
             _emit_table_block(
                 lines,
                 table_name,
@@ -156,9 +180,13 @@ def profile_schema(
                 options,
             )
             lines.append("")
+            toc.finish(
+                _toc_label(table_name, table_profile, size_info, conn), toc_start
+            )
             if progress is not None:
                 progress(index, len(tables), table_name)
 
+    toc_start = toc.start()
     if failed_ddl_tables:
         names = ", ".join(
             quote_ident(name, engine.dialect.name) for name in failed_ddl_tables
@@ -178,8 +206,22 @@ def profile_schema(
         summary = f"Skipped {len(skipped_empty_tables)} empty table(s): {names}"
         lines.append(f"- {summary}")
         lines.append("")
+    toc.finish("Summary", toc_start)
 
-    return "\n".join(lines).rstrip() + "\n"
+    markdown = "\n".join(lines).rstrip() + "\n"
+    toc_markdown = (
+        render_toc(
+            toc.entries,
+            generated_at_utc=generated_at,
+            dialect=engine.dialect.name,
+            database=database,
+            schema=schema_value,
+            profile_markdown=markdown,
+        )
+        if options.emit_toc and toc.entries
+        else None
+    )
+    return markdown, toc_markdown
 
 
 def _profile_one_table(
@@ -291,6 +333,27 @@ def _profile_one_table(
     return table_profile, raw_ddl, fallback_note
 
 
+def _row_count_display(table_profile: TableProfile, size_info) -> str:
+    """Row count for the table header: profiled value, else size estimate."""
+    row_display = table_profile.row_count_display
+    if not row_display and size_info is not None:
+        # Empty included tables: total_rows is 0.
+        if size_info.total_rows is not None:
+            row_display = str(size_info.total_rows)
+        elif size_info.estimate is not None:
+            row_display = f"≈{size_info.estimate}"
+    return row_display
+
+
+def _toc_label(table_name: str, table_profile: TableProfile, size_info, conn) -> str:
+    """TOC entry text for a table block, mirroring its section header."""
+    row_display = _row_count_display(table_profile, size_info)
+    label = quote_ident(table_name, conn.dialect.name)
+    if row_display:
+        label += f" (rows={row_display})"
+    return label
+
+
 def _emit_table_block(
     lines: list[str],
     table_name: str,
@@ -318,13 +381,7 @@ def _emit_table_block(
     ``indexes:`` line; the utility-DDL fallback (reflection failed) has no
     column tokens, so its block is DDL + note only.
     """
-    row_display = table_profile.row_count_display
-    if not row_display and size_info is not None:
-        # Empty included tables: total_rows is 0.
-        if size_info.total_rows is not None:
-            row_display = str(size_info.total_rows)
-        elif size_info.estimate is not None:
-            row_display = f"≈{size_info.estimate}"
+    row_display = _row_count_display(table_profile, size_info)
     header = f"# {quote_ident(table_name, conn.dialect.name)}"
     if row_display:
         header += f"  (rows={row_display})"

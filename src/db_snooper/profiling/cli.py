@@ -47,6 +47,14 @@ def build_arg_parser(prog: str | None = None) -> argparse.ArgumentParser:
         action="store_true",
         help="Write one .md profile per table instead of one schema profile.",
     )
+    profile.add_argument(
+        "--no-toc",
+        action="store_true",
+        help=(
+            "Skip the <schema>.toc.md sidecar that indexes every section of the "
+            "profile with its line range. Emitted by default."
+        ),
+    )
     filters.add_argument("--include-tables", help="Comma-separated table allowlist.")
     filters.add_argument("--exclude-tables", help="Comma-separated table denylist.")
     safety.add_argument(
@@ -90,6 +98,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         include_tables=parse_table_set(args.include_tables),
         exclude_tables=parse_table_set(args.exclude_tables) or frozenset(),
         schema=resolve_schema(args),
+        emit_toc=not args.no_toc,
     )
     engine = create_engine(url)
     progress_bar = ProgressBar("Profiling", 0)
@@ -124,9 +133,14 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
                 )
             else:
                 output_dir.mkdir(parents=True, exist_ok=True)
-                (output_dir / f"{output_component(document.schema)}.md").write_text(
+                stem = output_component(document.schema)
+                (output_dir / f"{stem}.md").write_text(
                     document.markdown, encoding="utf-8"
                 )
+                if document.toc:
+                    (output_dir / f"{stem}.toc.md").write_text(
+                        document.toc, encoding="utf-8"
+                    )
     except SQLAlchemyError as exc:
         progress_bar.finish()
         reason = str(getattr(exc, "orig", exc)).splitlines()[0]

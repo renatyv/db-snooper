@@ -141,6 +141,25 @@ all rows:
 | <col> | <v> | <v> | ... | <v> |
 ```
 
+## TOC sidecar
+
+Every schema profile is written together with a `<schema>.toc.md` sidecar in the same generation run — one file indexing the other, so a consumer can jump straight to a section's lines instead of scanning the whole profile. Emission is on by default; `ProfileOptions(emit_toc=False)` or the CLI `--no-toc` disables it. `--per-table` profiles get no sidecar (each file holds a single table block), and a profile with no sections emits none.
+
+The sidecar lists one line per top-level section of the profile, in document order, with its exact line range:
+
+```
+Relationships: lines 10-14
+"batch_box_association" (rows=392): lines 16-27
+"batch_port" (rows=7): lines 29-45
+Summary: lines 289-290
+```
+
+Global sections are indexed too — `Relationships` when present, and the trailing skipped-tables bullet block as `Summary` — not just tables. Table labels mirror their section headers (`"table" (rows=N)`) with the dialect's identifier quoting.
+
+Line ranges are computed from the writer's own positions while emitting the profile — the markdown is never re-parsed after the fact — so the numbers are correct by construction. A section's range ends at its last non-blank line.
+
+The sidecar carries its own frontmatter: `generator`, `version`, `generated_at_utc`, `dialect`, `database`, `schema`, `profile_lines`, and `profile_sha256` — the sha256 of the profile `.md` file it indexes. Consumers re-hash the profile and compare before trusting any range, failing fast on a stale TOC instead of reading shifted line ranges.
+
 ## Reliability
 
 - Don't crash on exceptions, just skip the metric.

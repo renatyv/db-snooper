@@ -36,7 +36,7 @@ uvx db-snooper profile -h
 
 For frequent use, install once with `uv tool install db-snooper` and run `db-snooper ...` directly.
 
-The generated profile (`<database>/<schema>.md`) contains `CREATE TABLE` DDL with indexes/constraints, total row counts, sampled rows, and per-column null/distinct/range/median/top-value summaries — sensitive columns are redacted and very large tables use internal stats only. For metered or production databases, use `--metadata-only`; BigQuery scans are capped at 1 GiB by default and can be changed with `--max-bytes-billed`.
+The generated profile (`<database>/<schema>.md`) contains `CREATE TABLE` DDL with indexes/constraints, total row counts, sampled rows, and per-column null/distinct/range/median/top-value summaries — sensitive columns are redacted and very large tables use internal stats only. A `<schema>.toc.md` sidecar is written alongside it, indexing every section (relationships, tables, summary) with exact line ranges and the profile's sha256, so specific tables can be read by line range without loading the whole profile. For metered or production databases, use `--metadata-only`; BigQuery scans are capped at 1 GiB by default and can be changed with `--max-bytes-billed`.
 
 ## Profiling Files (Parquet, JSON, CSV, Arrow, ...)
 

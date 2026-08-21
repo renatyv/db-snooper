@@ -13,7 +13,7 @@ from db_snooper.contracts import (
     SchemaProfilePlan,
 )
 from db_snooper.permissions import check_permissions
-from db_snooper.profiling.core import profile_schema
+from db_snooper.profiling.core import profile_schema, profile_schema_with_toc
 from db_snooper.profiling.discovery import list_schema_tables
 from db_snooper.profiling.suggestions import profile_suggestions
 from db_snooper.query_timeout import BigQueryBudget
@@ -39,8 +39,18 @@ def profile_database(
     options: ProfileOptions,
     progress: ProfileProgress | None = None,
 ) -> str:
+    markdown, _ = profile_database_with_toc(engine, options, progress)
+    return markdown
+
+
+def profile_database_with_toc(
+    engine: Engine,
+    options: ProfileOptions,
+    progress: ProfileProgress | None = None,
+) -> tuple[str, str | None]:
+    """Profile the single resolved schema, returning ``(markdown, toc | None)``."""
     budget = BigQueryBudget(options.max_bytes_billed)
-    return profile_schema(
+    return profile_schema_with_toc(
         engine, build_schema_plan(engine, options), progress, bigquery_budget=budget
     )
 
@@ -93,16 +103,21 @@ def run_profiles(
                     )
                 )
         else:
+            # Schema-level profile: attach the TOC sidecar (None when disabled
+            # or nothing to index). Per-table documents intentionally get no
+            # TOC — each file holds exactly one table block.
+            markdown, toc = profile_schema_with_toc(
+                engine,
+                plan,
+                schema_progress,
+                bigquery_budget=bigquery_budget,
+            )
             documents.append(
                 ProfileDocument(
                     schema=schema,
                     table=None,
-                    markdown=profile_schema(
-                        engine,
-                        plan,
-                        schema_progress,
-                        bigquery_budget=bigquery_budget,
-                    ),
+                    markdown=markdown,
+                    toc=toc,
                 )
             )
 
